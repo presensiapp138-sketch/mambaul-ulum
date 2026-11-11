@@ -1,0 +1,6 @@
+{
+  "name": "Sistem Presensi Siswa & Guru",
+  "description": "Aplikasi presensi digital cerdas untuk siswa dan guru berbasis deteksi wajah, scan QR/kartu, sinkronisasi Google Sheets, mode kiosk, GPS presensi guru, dan rekap wali kelas/BK.",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

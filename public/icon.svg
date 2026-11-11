@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#1e40af" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="100" fill="url(#grad)" />
+  <g fill="none" stroke="#ffffff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Target corners / camera scanner frame -->
+    <path d="M 116 166 L 116 126 C 116 120 120 116 126 116 L 166 116" />
+    <path d="M 396 166 L 396 126 C 396 120 392 116 386 116 L 346 116" />
+    <path d="M 116 346 L 116 386 C 116 392 120 396 126 396 L 166 396" />
+    <path d="M 396 346 L 396 386 C 396 392 392 396 386 396 L 346 396" />
+  </g>
+  <!-- Face silhouette / ID card biometric motif -->
+  <circle cx="256" cy="210" r="64" fill="#ffffff" />
+  <path d="M 176 340 C 176 295 212 265 256 265 C 300 265 336 295 336 340 Z" fill="#ffffff" />
+  <!-- Verification check badge -->
+  <circle cx="370" cy="370" r="50" fill="url(#accent)" stroke="#ffffff" stroke-width="10" />
+  <path d="M 350 370 L 364 384 L 394 354" fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

@@ -1,11 +1,150 @@
-<div align="center">
+# Sistem Presensi Siswa & Guru (Google Sheets & Vercel)
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Aplikasi web presensi digital modern, cerdas, dan lengkap untuk sekolah. Dilengkapi dengan deteksi wajah di sisi browser, scan barcode/RFID, mode kiosk layar penuh, validasi lokasi GPS guru, rekapitulasi wali kelas & BK, serta sinkronisasi data ke Google Sheets dan Google Drive.
 
-  <h1>Built with AI Studio</h2>
+---
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+## 🌟 Fitur Unggulan
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+1. **Presensi Siswa (Mode Kiosk Publik - Tanpa Sandi)**
+   - Deteksi semua wajah dalam frame kamera (frame diproses hanya di memori browser, tidak ada foto/video yang disimpan ke server demi privasi siswa).
+   - Pencocokan wajah otomatis dengan scan kartu barcode/QR/RFID fisik.
+   - Deteksi keterlambatan otomatis berdasarkan jam batas toleransi sekolah.
+   - Peringatan instan jika terdeteksi presensi ganda pada hari yang sama.
+   - Presensi manual bagi petugas piket dengan pencatatan ke AuditLog.
+   - Fitur "Izin ke Toilet" dengan timer berjalan dan peringatan jika melebihi batas waktu maksimal.
 
-</div>
+2. **Dashboard Wali Kelas**
+   - Ringkasan kehadiran kelas hari ini (Hadir, Terlambat, Izin, Sakit, Alpa, Siswa di Toilet).
+   - Rekap Harian, Pekanan, Bulanan, dan Perbandingan Antar Bulan.
+   - Grafik interaktif tren kehadiran dan persentase kehadiran per siswa.
+   - Koreksi status presensi dengan alasan audit.
+   - Ekspor laporan ke Microsoft Excel (.xlsx) dan cetak PDF.
+
+3. **Dashboard BK & Kesiswaan**
+   - Radar otomatis deteksi dini siswa bermasalah (sering alpa, sering terlambat, sering izin toilet).
+   - Label peringatan otomatis (Kuning / Merah).
+   - Grafik perbandingan kehadiran antar kelas.
+   - Pencatatan dan log tindak lanjut bimbingan konseling (BK).
+
+4. **Presensi Mandiri Guru (Login)**
+   - Presensi Masuk & Pulang dengan verifikasi deteksi wajah + Geofence GPS.
+   - Validasi radius sekolah (presensi ditolak jika berada di luar radius).
+   - Riwayat kehadiran pribadi guru dan formulir pengajuan izin/sakit.
+
+5. **Panel Administrator Utama**
+   - Pengaturan jam masuk, batas terlambat, batas durasi toilet, dan toleransi pelanggaran.
+   - Manajemen akun pengguna: Admin, Wali Kelas, Guru BK, Kesiswaan, Guru Mapel.
+   - Pendaftaran Biometric Wajah (mengambil & menyimpan vektor matematika 128 float, tanpa gambar).
+   - Pengaturan titik koordinat GPS dan radius sekolah.
+   - Manajemen kelas, siswa, dan kenaikan kelas massal (*naik kelas*).
+   - Upload massal data siswa dari file Excel/CSV beserta laporan baris yang gagal dan pencegahan duplikasi NIS.
+   - Unduh template Excel siswa dan guru siap pakai.
+   - Cetak massal kartu identitas siswa dengan barcode.
+   - Backup data ke Google Drive dan viewer Audit Log aktivitas.
+
+6. **Sinkronisasi & Offline-First (PWA)**
+   - Sinkronisasi cerdas dengan polling diff per 3-5 detik via ChangeLog.
+   - Dukungan mode offline dengan penyimpanan antrian di IndexedDB dan kirim ulang otomatis saat internet pulih.
+   - PWA Installable untuk dipasang sebagai aplikasi di Android, iOS, tablet, dan PC desktop.
+
+---
+
+## 🚀 Panduan Setup Google Service Account & Google Sheets
+
+### Langkah 1: Buat Google Service Account
+1. Buka [Google Cloud Console](https://console.cloud.google.com/).
+2. Buat project baru (misal: `presensi-sekolah`).
+3. Aktifkan API berikut di menu **APIs & Services > Library**:
+   - **Google Sheets API**
+   - **Google Drive API**
+4. Masuk ke **IAM & Admin > Service Accounts**:
+   - Klik **Create Service Account**.
+   - Beri nama (misal: `presensi-bot`).
+   - Beri peran (*Role*): **Editor**.
+   - Klik **Done**.
+5. Klik pada Service Account yang baru dibuat, buka tab **Keys**:
+   - Klik **Add Key > Create New Key > Pilih JSON > Create**.
+   - File JSON akan terunduh ke komputer Anda. Buka file tersebut dengan text editor.
+   - Anda akan membutuhkan:
+     - `client_email` (contoh: `presensi-bot@project-id.iam.gserviceaccount.com`)
+     - `private_key` (teks panjang yang diawali `-----BEGIN PRIVATE KEY-----`)
+
+### Langkah 2: Buat Google Spreadsheet
+1. Buka [Google Sheets](https://sheets.new) dan buat spreadsheet baru (misal: `Database_Presensi_Sekolah`).
+2. Klik tombol **Bagikan (Share)** di pojok kanan atas:
+   - Masukkan email Service Account (`client_email`) dari langkah 1.
+   - Berikan hak akses **Editor**.
+   - Hapus centang "Kirim notifikasi" lalu klik **Kirim**.
+3. Salin **Spreadsheet ID** dari URL browser:
+   - Format: `https://docs.google.com/spreadsheets/d/[SPREADSHEET_ID]/edit`
+
+### Langkah 3: (Opsional) Buat Folder Google Drive
+1. Buka [Google Drive](https://drive.google.com).
+2. Buat folder baru (misal: `Presensi_Drive_Backup`).
+3. Bagikan folder tersebut ke email Service Account dengan akses **Editor**.
+4. Salin **Folder ID** dari URL browser.
+
+---
+
+## ⚙️ Daftar Environment Variables
+
+Salin file `.env.example` menjadi `.env` atau atur pada dashboard hosting Anda (Vercel):
+
+```env
+# Email service account dari file JSON key
+GOOGLE_SERVICE_ACCOUNT_EMAIL="presensi-bot@project-id.iam.gserviceaccount.com"
+
+# Private key service account (gunakan newline \n jika diletakkan satu baris)
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC6...\n-----END PRIVATE KEY-----\n"
+
+# ID dari Google Sheets yang telah di-share ke service account
+SPREADSHEET_ID="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+
+# ID folder Google Drive untuk backup (opsional)
+DRIVE_FOLDER_ID="1fO1_bZabcDEfgHIjkLMnoPQRstUVwxYZ"
+
+# Kunci rahasia acak untuk enkripsi sesi JWT
+JWT_SECRET="presensi_rahasia_sekolah_super_aman_2026_xyz"
+```
+
+> **Catatan Pengujian Awal:** Jika environment variable di atas belum diisi, aplikasi akan otomatis berjalan dalam **Simulated In-Memory Mode** dengan data contoh lengkap siap pakai, sehingga seluruh antarmuka dan alur presensi bisa langsung dicoba! Begitu environment variables diisi, tekan tombol **Init Google Sheets** di panel Admin untuk membuat seluruh tab dan kolom database secara otomatis.
+
+---
+
+## 📦 Akun Demo Bawaan
+
+| Peran | Username | Password |
+|---|---|---|
+| **Administrator** | `admin` | `admin123` |
+| **Wali Kelas (X RPL 1)** | `wali1` | `guru123` |
+| **Guru BK** | `bk1` | `bk123` |
+| **Kesiswaan** | `kesiswaan1` | `kesiswaan123` |
+| **Guru Mapel** | `guru1` | `guru123` |
+
+---
+
+## 🚢 Langkah Deploy ke Vercel
+
+1. Pastikan project memiliki file `vercel.json` dan `.npmrc` (sudah disertakan di repository).
+2. Hubungkan repository GitHub Anda ke [Vercel](https://vercel.com).
+3. Pada halaman konfigurasi project di Vercel:
+   - **Framework Preset**: Pilih **Vite**.
+   - **Build Command**: `npm run build`
+   - **Output Directory**: `dist`
+4. Di bagian **Environment Variables**, tambahkan:
+   - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
+   - `GOOGLE_PRIVATE_KEY` (pastikan tanda kutip dan `\n` terbaca dengan benar)
+   - `SPREADSHEET_ID`
+   - `DRIVE_FOLDER_ID`
+   - `JWT_SECRET`
+5. Klik **Deploy**. Selesai! Aplikasi Anda siap digunakan 24/7 di sekolah.
+
+---
+
+## 🔒 Privasi Data Wajah Siswa
+
+Aplikasi ini mematuhi standar privasi:
+1. Tidak ada foto atau video wajah siswa yang pernah disimpan atau ditransmisikan ke server.
+2. Kamera hanya diproses secara lokal di dalam GPU / RAM browser menggunakan model neural network TensorFlow di sisi klien.
+3. Yang disimpan ke database hanyalah 128 angka koordinat matematis (*descriptor vector*) yang tidak dapat direkonstruksi kembali menjadi foto wajah asli.
