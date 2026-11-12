@@ -9,6 +9,26 @@ export interface AuthUser {
   classId?: string;
 }
 
+export type EducationLevel = 'SMA/MA' | 'SMP/MTS' | 'SD/MI';
+
+export interface LevelConfig {
+  level: EducationLevel;
+  unitName: string;
+  principalName: string;
+  principalNip: string;
+  principalSignatureUrl?: string;
+  logoUrl?: string;
+  websiteUrl?: string;
+  qrCodeUrl?: string;
+  watermarkUrl?: string;
+  schoolAddress?: string;
+  vision: string;
+  missions: string[];
+  accentColor: string;
+  headerColor: string;
+  badgeText: string;
+}
+
 export interface Student {
   id: string;
   nis: string;
@@ -18,6 +38,12 @@ export interface Student {
   classId: string;
   barcodeCard: string;
   parentPhone: string;
+  photoUrl?: string;
+  level?: EducationLevel;
+  birthPlace?: string;
+  birthDate?: string;
+  address?: string;
+  bloodType?: string;
   isActive: boolean;
   hasFaceEnrolled?: boolean;
   createdAt: string;
@@ -44,6 +70,7 @@ export interface SchoolClass {
   name: string;
   grade: string;
   academicYear: string;
+  level?: EducationLevel;
   homeRoomTeacherId?: string;
   homeRoomTeacherName?: string;
   studentCount?: number;
@@ -137,6 +164,12 @@ export interface SchoolSettings {
   teacherPhotoProofEnabled: boolean;
   parentNotificationEnabled: boolean;
   holidays: string[];
+  foundationAddress?: string;
+  foundationWebsite?: string;
+  foundationWatermarkUrl?: string;
+  foundationQrCodeUrl?: string;
+  levelConfigsJson?: string;
+  levels?: Record<EducationLevel, LevelConfig>;
 }
 
 export interface FaceTemplate {

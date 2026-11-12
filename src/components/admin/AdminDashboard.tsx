@@ -42,6 +42,7 @@ import {
 } from '../../lib/faceDetection.ts';
 import { CardSkeleton, TableSkeleton } from '../common/Skeleton.tsx';
 import { ConfirmModal } from '../common/ConfirmModal.tsx';
+import { StudentCardManager } from './StudentCardManager.tsx';
 
 export const AdminDashboard: React.FC = () => {
   const { user } = useAuth();
@@ -304,6 +305,45 @@ export const AdminDashboard: React.FC = () => {
                 />
               </div>
 
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Alamat Sekolah / Yayasan (Ditampilkan di Aplikasi & Kartu Pelajar)
+                </label>
+                <input
+                  type="text"
+                  value={settingsForm.foundationAddress || ''}
+                  onChange={e => setSettingsForm({ ...settingsForm, foundationAddress: e.target.value })}
+                  placeholder="Jl. Pesantren Mambaul Ulum No. 45, Diwek, Jombang, Jawa Timur 61471"
+                  className="w-full px-4 py-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Website Sekolah / Yayasan
+                </label>
+                <input
+                  type="text"
+                  value={settingsForm.foundationWebsite || ''}
+                  onChange={e => setSettingsForm({ ...settingsForm, foundationWebsite: e.target.value })}
+                  placeholder="https://mambaululum.sch.id"
+                  className="w-full px-4 py-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Watermark Background Kartu (Global URL / Data Image)
+                </label>
+                <input
+                  type="text"
+                  value={settingsForm.foundationWatermarkUrl || ''}
+                  onChange={e => setSettingsForm({ ...settingsForm, foundationWatermarkUrl: e.target.value })}
+                  placeholder="https://... atau upload via tab Cetak Kartu"
+                  className="w-full px-4 py-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+                />
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                   Jam Mulai Presensi Masuk (WIB)
@@ -480,12 +520,18 @@ export const AdminDashboard: React.FC = () => {
         />
       )}
 
-      {/* Tab 8: Bulk ID Cards / QR Print Preview */}
+      {/* Tab 8: Bulk ID Cards & JPG Generator Multi-Jenjang */}
       {activeTab === 'id_cards' && (
-        <IdCardsSection
+        <StudentCardManager
           students={students}
           classes={classes}
           schoolName={settings?.schoolName || 'Yayasan Mambaul Ulum'}
+          schoolAddress={settings?.foundationAddress}
+          foundationWebsite={settings?.foundationWebsite}
+          watermarkUrl={settings?.foundationWatermarkUrl}
+          faceTemplates={faceTemplates}
+          onUpdateSettings={updateSettings}
+          initialLevelConfigsJson={settings?.levelConfigsJson}
         />
       )}
 
@@ -613,8 +659,39 @@ const FaceDatabaseSection: React.FC<{
         }),
       });
 
+      // Automatically capture formal blue background portrait for student card
+      if (selectedPersonType === 'student' && videoRef.current) {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 300;
+          canvas.height = 400; // 3:4 portrait
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#1e40af'; // Formal Indonesian student blue background
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const vw = videoRef.current.videoWidth || 640;
+            const vh = videoRef.current.videoHeight || 480;
+            const cropW = Math.min(vw, vh * 0.75);
+            const cropH = cropW * (4 / 3);
+            const startX = Math.max(0, (vw - cropW) / 2);
+            const startY = Math.max(0, (vh - cropH) / 2);
+
+            ctx.drawImage(videoRef.current, startX, startY, cropW, Math.min(cropH, vh - startY), 0, 0, 300, 400);
+            const bluePhotoDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+
+            await apiRequest(`/api/students/${selectedPersonId}`, {
+              method: 'PUT',
+              body: JSON.stringify({ photoUrl: bluePhotoDataUrl }),
+            });
+          }
+        } catch (photoErr) {
+          console.warn('Could not generate card photo thumbnail:', photoErr);
+        }
+      }
+
       if (res.success) {
-        setMessage('Wajah berhasil didaftarkan! Hanya vektor descriptor 128 float yang disimpan.');
+        setMessage('Wajah berhasil didaftarkan! Vektor 128 float dan foto pas kartu berlatar biru otomatis diperbarui.');
         stopCamera();
         onRefresh();
       } else {

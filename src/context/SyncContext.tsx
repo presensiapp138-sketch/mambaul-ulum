@@ -30,6 +30,8 @@ const defaultSettings: SchoolSettings = {
   teacherPhotoProofEnabled: false,
   parentNotificationEnabled: true,
   holidays: [],
+  foundationAddress: 'Jl. Pesantren Mambaul Ulum No. 45, Diwek, Jombang, Jawa Timur 61471',
+  foundationWebsite: 'https://mambaululum.sch.id',
 };
 
 const SyncContext = createContext<SyncContextType | undefined>(undefined);

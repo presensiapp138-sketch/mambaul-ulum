@@ -27,11 +27,32 @@ export interface Teacher {
   updatedBy: string;
 }
 
+export type EducationLevel = 'SMA/MA' | 'SMP/MTS' | 'SD/MI';
+
+export interface LevelConfig {
+  level: EducationLevel;
+  unitName: string;
+  principalName: string;
+  principalNip: string;
+  principalSignatureUrl?: string;
+  logoUrl?: string;
+  websiteUrl?: string;
+  qrCodeUrl?: string;
+  watermarkUrl?: string;
+  schoolAddress?: string;
+  vision: string;
+  missions: string[];
+  accentColor: string;
+  headerColor: string;
+  badgeText: string;
+}
+
 export interface SchoolClass {
   id: string;
   name: string; // e.g. "X RPL 1"
   grade: string; // "10", "11", "12"
   academicYear: string; // "2026/2027"
+  level?: EducationLevel;
   homeRoomTeacherId?: string;
   createdAt: string;
   updatedAt: string;
@@ -47,6 +68,12 @@ export interface Student {
   classId: string;
   barcodeCard: string; // Scanned QR / Barcode / RFID string
   parentPhone: string;
+  photoUrl?: string;
+  level?: EducationLevel;
+  birthPlace?: string;
+  birthDate?: string;
+  address?: string;
+  bloodType?: string;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -160,6 +187,11 @@ export interface SchoolSettings {
   teacherPhotoProofEnabled: boolean;
   parentNotificationEnabled: boolean;
   holidays: string[]; // ['2026-08-17', ...]
+  foundationAddress?: string;
+  foundationWebsite?: string;
+  foundationWatermarkUrl?: string;
+  foundationQrCodeUrl?: string;
+  levelConfigsJson?: string;
 }
 
 export interface FollowUpNote {

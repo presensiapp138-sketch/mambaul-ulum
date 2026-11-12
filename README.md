@@ -1,6 +1,6 @@
-# Sistem Presensi Siswa & Guru (Google Sheets & Vercel)
+# Sistem Presensi Siswa & Guru - Yayasan Mambaul Ulum (Google Sheets & Vercel)
 
-Aplikasi web presensi digital modern, cerdas, dan lengkap untuk sekolah. Dilengkapi dengan deteksi wajah di sisi browser, scan barcode/RFID, mode kiosk layar penuh, validasi lokasi GPS guru, rekapitulasi wali kelas & BK, serta sinkronisasi data ke Google Sheets dan Google Drive.
+Aplikasi web presensi digital modern, cerdas, dan lengkap untuk **Yayasan Mambaul Ulum**. Mendukung multi-jenjang pendidikan (**SMA/MA**, **SMP/MTS**, **SD/MI**), dilengkapi dengan deteksi wajah di sisi browser, scan barcode/RFID dengan auto-submit tanpa tombol Enter, mode kiosk layar penuh, validasi lokasi GPS guru, rekapitulasi wali kelas & BK, cetak kartu pelajar depan-belakang resolusi tinggi (.jpg & bulk .zip), serta sinkronisasi data ke Google Sheets dan Google Drive.
 
 ---
 
@@ -8,31 +8,48 @@ Aplikasi web presensi digital modern, cerdas, dan lengkap untuk sekolah. Dilengk
 
 1. **Presensi Siswa (Mode Kiosk Publik - Tanpa Sandi)**
    - Deteksi semua wajah dalam frame kamera (frame diproses hanya di memori browser, tidak ada foto/video yang disimpan ke server demi privasi siswa).
+   - Kamera responsif dan cepat dibuka dengan *background model preloading* dan inisialisasi paralel.
    - Pencocokan wajah otomatis dengan scan kartu barcode/QR/RFID fisik.
+   - **Dukungan Alat Scan Eksternal**: Barcode scanner USB atau RFID reader otomatis terkirim (*auto-submit*) tanpa perlu menekan tombol Enter berkat deteksi input stream cerdas.
    - Deteksi keterlambatan otomatis berdasarkan jam batas toleransi sekolah.
    - Peringatan instan jika terdeteksi presensi ganda pada hari yang sama.
    - Presensi manual bagi petugas piket dengan pencatatan ke AuditLog.
    - Fitur "Izin ke Toilet" dengan timer berjalan dan peringatan jika melebihi batas waktu maksimal.
 
-2. **Dashboard Wali Kelas**
+2. **Pusat Kustomisasi & Cetak Kartu Pelajar (Multi-Jenjang SMA/MA, SMP/MTS, SD/MI)**
+   - **Foto Wajah Otomatis Berlatar Biru Resmi**: Siswa yang wajahnya didaftarkan di sistem otomatis memiliki pas foto berlatar belakang biru standar resmi madrasah/sekolah Indonesia (rasio 3:4) yang langsung terpasang rapi pada kartu pelajar.
+   - **Barcode NISN Proporsional**: Posisi barcode dinaikkan dan diberi margin yang pas dari tepi bawah kartu sehingga tajam, mudah discan alat barcode/RFID, dan tidak terpotong saat dicetak atau dipotong.
+   - **Upload Tanda Tangan Kepala Sekolah per Jenjang**: Administrator dapat mengunggah file tanda tangan kepala sekolah untuk masing-masing jenjang (SMA/MA, SMP/MTS, SD/MI) yang otomatis terisi ke kartu pelajar jenjang terkait.
+   - **Ruang Kode QR Website Resmi di Belakang Kartu**: Sisi belakang kartu dilengkapi ruang khusus kode QR yang mengarah langsung ke website sekolah/yayasan (bisa auto-generate dari URL atau upload gambar QR khusus).
+   - **Logo Sekolah & Watermark Kartu**: Mendukung upload logo resmi sekolah/madrasah per jenjang serta watermark transparan yayasan yang otomatis menyesuaikan ukuran kartu depan dan belakang.
+   - **Alamat & Website Fleksibel**: Alamat dan website yayasan/sekolah dapat diubah secara dinamis baik pada aplikasi presensi maupun pada kartu pelajar.
+   - **Format Unduhan JPG & ZIP**:
+     - Unduh satuan kartu depan/belakang dalam format **JPG 300 DPI** berkualitas tinggi siap cetak.
+     - Unduh massal (*bulk download*) seluruh siswa per kelas atau per jenjang dalam satu berkas **.ZIP** lengkap dengan progress bar.
+
+3. **Multi-Jenjang Pendidikan Terpadu**
+   - Mendukung 3 jenjang sekaligus dalam satu yayasan: **SMA/MA**, **SMP/MTS**, dan **SD/MI**.
+   - Manajemen kelas dan data siswa terkelompok rapi per jenjang.
+
+4. **Dashboard Wali Kelas**
    - Ringkasan kehadiran kelas hari ini (Hadir, Terlambat, Izin, Sakit, Alpa, Siswa di Toilet).
    - Rekap Harian, Pekanan, Bulanan, dan Perbandingan Antar Bulan.
    - Grafik interaktif tren kehadiran dan persentase kehadiran per siswa.
    - Koreksi status presensi dengan alasan audit.
    - Ekspor laporan ke Microsoft Excel (.xlsx) dan cetak PDF.
 
-3. **Dashboard BK & Kesiswaan**
+5. **Dashboard BK & Kesiswaan**
    - Radar otomatis deteksi dini siswa bermasalah (sering alpa, sering terlambat, sering izin toilet).
    - Label peringatan otomatis (Kuning / Merah).
    - Grafik perbandingan kehadiran antar kelas.
    - Pencatatan dan log tindak lanjut bimbingan konseling (BK).
 
-4. **Presensi Mandiri Guru (Login)**
+6. **Presensi Mandiri Guru (Login)**
    - Presensi Masuk & Pulang dengan verifikasi deteksi wajah + Geofence GPS.
    - Validasi radius sekolah (presensi ditolak jika berada di luar radius).
    - Riwayat kehadiran pribadi guru dan formulir pengajuan izin/sakit.
 
-5. **Panel Administrator Utama**
+7. **Panel Administrator Utama**
    - Pengaturan jam masuk, batas terlambat, batas durasi toilet, dan toleransi pelanggaran.
    - Manajemen akun pengguna: Admin, Wali Kelas, Guru BK, Kesiswaan, Guru Mapel.
    - Pendaftaran Biometric Wajah (mengambil & menyimpan vektor matematika 128 float, tanpa gambar).
@@ -40,10 +57,10 @@ Aplikasi web presensi digital modern, cerdas, dan lengkap untuk sekolah. Dilengk
    - Manajemen kelas, siswa, dan kenaikan kelas massal (*naik kelas*).
    - Upload massal data siswa dari file Excel/CSV beserta laporan baris yang gagal dan pencegahan duplikasi NIS.
    - Unduh template Excel siswa dan guru siap pakai.
-   - Cetak massal kartu identitas siswa dengan barcode.
+   - Pusat Cetak Kartu Pelajar (JPG & ZIP).
    - Backup data ke Google Drive dan viewer Audit Log aktivitas.
 
-6. **Sinkronisasi & Offline-First (PWA)**
+8. **Sinkronisasi & Offline-First (PWA)**
    - Sinkronisasi cerdas dengan polling diff per 3-5 detik via ChangeLog.
    - Dukungan mode offline dengan penyimpanan antrian di IndexedDB dan kirim ulang otomatis saat internet pulih.
    - PWA Installable untuk dipasang sebagai aplikasi di Android, iOS, tablet, dan PC desktop.

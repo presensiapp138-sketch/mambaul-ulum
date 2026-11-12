@@ -438,7 +438,7 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
               {settings?.schoolName || 'Yayasan Mambaul Ulum'}
             </h1>
             <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400">
-              Tahun Ajaran {settings?.academicYear} • Batas Hadir: {settings?.lateCutoffTime} WIB
+              {settings?.foundationAddress ? `${settings.foundationAddress} • ` : ''}Tahun Ajaran {settings?.academicYear} • Batas Hadir: {settings?.lateCutoffTime} WIB
             </p>
           </div>
         </div>

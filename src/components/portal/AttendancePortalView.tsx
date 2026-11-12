@@ -83,6 +83,12 @@ export const AttendancePortalView: React.FC<AttendancePortalViewProps> = ({
             <h1 className="text-2xl sm:text-4xl font-black tracking-tight leading-tight">
               {settings?.schoolName || 'Yayasan Mambaul Ulum'}
             </h1>
+            {settings?.foundationAddress && (
+              <div className="flex items-center gap-1.5 text-xs text-blue-200 pt-0.5">
+                <MapPin className="w-3.5 h-3.5 text-amber-300 flex-shrink-0" />
+                <span>{settings.foundationAddress}</span>
+              </div>
+            )}
             <p className="text-xs sm:text-sm text-blue-100 max-w-xl">
               Pilih portal presensi di bawah untuk memulai. Presensi siswa menggunakan deteksi wajah di kamera dan scan kartu/RFID, presensi guru menggunakan validasi wajah & lokasi GPS.
             </p>
