@@ -27,7 +27,10 @@ import {
   Cloud,
   ExternalLink,
   X,
+  HardDrive,
+  LogOut,
 } from 'lucide-react';
+import type { User as FirebaseUser } from 'firebase/auth';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { useSync } from '../../context/SyncContext.tsx';
 import {
@@ -40,6 +43,17 @@ import {
   FaceTemplate,
 } from '../../types/index.ts';
 import { apiRequest } from '../../lib/api.ts';
+import {
+  initWorkspaceAuth,
+  googleWorkspaceSignIn,
+  getWorkspaceAccessToken,
+  logoutWorkspaceAuth,
+} from '../../lib/workspaceAuth.ts';
+import {
+  syncAllDatabaseToGoogleWorkspace,
+  type WorkspaceExportBundle,
+  type WorkspaceSyncResult,
+} from '../../lib/workspaceSync.ts';
 import {
   loadFaceDetectionModels,
   areFaceModelsLoaded,
@@ -98,6 +112,12 @@ export const AdminDashboard: React.FC = () => {
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
   const [cloudSyncResult, setCloudSyncResult] = useState<any | null>(null);
 
+  // Google Workspace OAuth & Confirmation Dialog state
+  const [workspaceUser, setWorkspaceUser] = useState<FirebaseUser | null>(null);
+  const [workspaceNeedsAuth, setWorkspaceNeedsAuth] = useState<boolean>(true);
+  const [isGoogleSigningIn, setIsGoogleSigningIn] = useState<boolean>(false);
+  const [showSyncConfirmDialog, setShowSyncConfirmDialog] = useState<boolean>(false);
+
   // Load all admin data
   const loadAdminData = useCallback(async () => {
     setIsLoading(true);
@@ -150,6 +170,20 @@ export const AdminDashboard: React.FC = () => {
     }
   }, [settings]);
 
+  useEffect(() => {
+    const unsubscribe = initWorkspaceAuth(
+      (fbUser, _token) => {
+        setWorkspaceUser(fbUser);
+        setWorkspaceNeedsAuth(false);
+      },
+      () => {
+        setWorkspaceUser(null);
+        setWorkspaceNeedsAuth(true);
+      }
+    );
+    return () => unsubscribe();
+  }, []);
+
   const isSyncEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(syncEmailInput.trim());
 
   // Save Settings
@@ -165,8 +199,11 @@ export const AdminDashboard: React.FC = () => {
   // Open Email-Linked Drive & Sheets Sync Modal
   const openCloudSyncModal = () => {
     setCloudSyncError(null);
+    setShowSyncConfirmDialog(false);
     if (settings?.syncTargetEmail) {
       setSyncEmailInput(settings.syncTargetEmail);
+    } else if (workspaceUser?.email && !syncEmailInput) {
+      setSyncEmailInput(workspaceUser.email);
     }
     if (settings?.syncLinkedSpreadsheetId) {
       setSyncSpreadsheetIdInput(settings.syncLinkedSpreadsheetId);
@@ -177,18 +214,79 @@ export const AdminDashboard: React.FC = () => {
     setShowCloudSyncModal(true);
   };
 
-  // Execute Link & Full Sync to Drive & Sheets (Requires Email First)
-  const handleRunCloudSync = async (linkOnly: boolean = false) => {
+  // Connect Google Account for Google Drive & Google Sheets (with optional email login_hint)
+  const handleGoogleSignIn = async () => {
+    setIsGoogleSigningIn(true);
+    setCloudSyncError(null);
+    try {
+      const hintEmail = syncEmailInput.trim() || undefined;
+      const result = await googleWorkspaceSignIn(hintEmail);
+      setWorkspaceUser(result.user);
+      setWorkspaceNeedsAuth(false);
+      if (!syncEmailInput.trim() && result.user.email) {
+        setSyncEmailInput(result.user.email);
+      }
+    } catch (e: any) {
+      const msg = e?.message || 'Gagal menghubungkan akun Google.';
+      if (msg.includes('popup-closed-by-user')) {
+        setCloudSyncError('Jendela login Google ditutup sebelum selesai. Silakan coba lagi.');
+      } else {
+        setCloudSyncError(msg);
+      }
+    } finally {
+      setIsGoogleSigningIn(false);
+    }
+  };
+
+  const handleGoogleLogout = async () => {
+    try {
+      await logoutWorkspaceAuth();
+      setWorkspaceUser(null);
+      setWorkspaceNeedsAuth(true);
+    } catch (e: any) {
+      setCloudSyncError(e?.message || 'Gagal memutuskan akun Google.');
+    }
+  };
+
+  // Prompt user before mutating/overwriting Google Drive & Google Sheets
+  const handleRequestCloudSync = () => {
     const cleanEmail = syncEmailInput.trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      setCloudSyncError('Harap masukkan alamat email yang valid terlebih dahulu sebelum menyinkronkan ke Drive & Sheets.');
+      setCloudSyncError(
+        'Harap masukkan alamat email yang valid terlebih dahulu sebelum menyinkronkan ke Drive & Sheets.'
+      );
       return;
     }
 
+    const token = getWorkspaceAccessToken();
+    if (!token) {
+      setWorkspaceNeedsAuth(true);
+      setCloudSyncError(
+        'Silakan klik tombol "Sign in with Google" terlebih dahulu untuk mengaktifkan akses Google Drive & Google Sheets.'
+      );
+      return;
+    }
+
+    setCloudSyncError(null);
+    setShowSyncConfirmDialog(true);
+  };
+
+  // Execute Link, Local Package Export, or Full Workspace Drive & Sheets Sync (after explicit confirmation)
+  const handleRunCloudSync = async (linkOnly: boolean = false, skipWorkspaceApi: boolean = false) => {
+    const cleanEmail = syncEmailInput.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setCloudSyncError(
+        'Harap masukkan alamat email yang valid terlebih dahulu sebelum menyinkronkan ke Drive & Sheets.'
+      );
+      return;
+    }
+
+    setShowSyncConfirmDialog(false);
     setIsCloudSyncing(true);
     setCloudSyncError(null);
 
     try {
+      // 1. Always preserve local server storage & link target email on server + get full 13-table exportBundle
       const res = await apiRequest('/api/sync/cloud', {
         method: 'POST',
         body: JSON.stringify({
@@ -199,15 +297,78 @@ export const AdminDashboard: React.FC = () => {
         }),
       });
 
-      if (res.success) {
+      if (!res.success) {
+        setCloudSyncError(res.error || 'Gagal menyinkronkan database di server.');
+        return;
+      }
+
+      if (linkOnly || skipWorkspaceApi) {
         setCloudSyncResult(res);
         await loadAdminData();
         await notifyFaceDatabaseChanged();
-      } else {
-        setCloudSyncError(res.error || 'Gagal menyinkronkan database.');
+        return;
       }
+
+      // 2. Push all 13 tables to Google Drive & Google Sheets via active Workspace OAuth access token
+      const accessToken = getWorkspaceAccessToken();
+      if (accessToken && res.exportBundle) {
+        const wsResult: WorkspaceSyncResult = await syncAllDatabaseToGoogleWorkspace({
+          accessToken,
+          targetEmail: cleanEmail,
+          schoolName: settings?.schoolName || 'Yayasan_Mambaul_Ulum',
+          existingFolderId: syncFolderIdInput.trim() || settings?.syncLinkedFolderId || undefined,
+          existingSpreadsheetId: syncSpreadsheetIdInput.trim() || settings?.syncLinkedSpreadsheetId || undefined,
+          exportBundle: res.exportBundle as WorkspaceExportBundle,
+        });
+
+        setSyncFolderIdInput(wsResult.folderId);
+        setSyncSpreadsheetIdInput(wsResult.spreadsheetId);
+
+        const nowIso = new Date().toISOString();
+        await updateSettings({
+          syncTargetEmail: cleanEmail,
+          syncLinkedFolderId: wsResult.folderId,
+          syncLinkedSpreadsheetId: wsResult.spreadsheetId,
+          lastCloudSyncAt: nowIso,
+        });
+
+        setCloudSyncResult({
+          ...res,
+          cloudSynced: true,
+          sheetsResult: {
+            ...(res.sheetsResult || {}),
+            cloudSynced: true,
+            spreadsheetId: wsResult.spreadsheetId,
+            spreadsheetUrl: wsResult.spreadsheetUrl,
+            sheetsSynced: wsResult.sheetsSynced,
+          },
+          driveResult: {
+            ...(res.driveResult || {}),
+            cloudSynced: true,
+            folderId: wsResult.folderId,
+            folderUrl: wsResult.folderUrl,
+            fileId: wsResult.backupFileId,
+            fileName: wsResult.backupFileName,
+            fileUrl: wsResult.backupFileUrl,
+          },
+          message: `Seluruh ${wsResult.sheetsSynced.length} tabel database berhasil disinkronkan ke Google Drive & Google Sheets (${workspaceUser?.email || cleanEmail})! Penyimpanan lokal server tetap aktif berjalan.`,
+        });
+      } else {
+        setCloudSyncResult(res);
+      }
+
+      await loadAdminData();
+      await notifyFaceDatabaseChanged();
     } catch (e: any) {
-      setCloudSyncError(e.message || 'Terjadi kesalahan saat sinkronisasi ke Drive & Sheets.');
+      const msg = e?.message || 'Terjadi kesalahan saat sinkronisasi ke Drive & Sheets.';
+      if ((e as any)?.statusCode === 401 || msg.toLowerCase().includes('invalid credentials')) {
+        setWorkspaceNeedsAuth(true);
+        setCloudSyncError(
+          'Sesi Google Drive & Sheets kedaluwarsa. Silakan klik "Sign in with Google" ulang lalu sinkronkan kembali.'
+        );
+      } else {
+        setCloudSyncError(msg);
+      }
     } finally {
       setIsCloudSyncing(false);
     }
@@ -681,17 +842,31 @@ export const AdminDashboard: React.FC = () => {
                     Sinkronisasi Database ke Drive & Sheets
                   </h3>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Wajib memasukkan email terlebih dahulu agar seluruh file Drive & Google Sheets ditautkan sesuai email.
+                    Masukkan email penautan & hubungkan akun Google agar seluruh 13 tabel tersinkron ke Drive dan Sheets.
                   </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setShowCloudSyncModal(false)}
+                onClick={() => {
+                  setShowSyncConfirmDialog(false);
+                  setShowCloudSyncModal(false);
+                }}
                 className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
               >
                 <X className="w-5 h-5" />
               </button>
+            </div>
+
+            {/* Hybrid Local Server + Cloud Banner */}
+            <div className="p-3.5 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-800 dark:text-indigo-200 flex items-start gap-2.5">
+              <HardDrive className="w-4 h-4 text-indigo-600 dark:text-indigo-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold">Mode Hibrid: Penyimpanan Lokal Server Tetap Aktif</div>
+                <div className="text-[11px] opacity-90 mt-0.5">
+                  Aplikasi tetap berjalan cepat dengan database lokal di server. Sinkronisasi Google Drive & Sheets bekerja berdampingan sebagai integrasi cloud resmi.
+                </div>
+              </div>
             </div>
 
             {cloudSyncError && (
@@ -756,10 +931,109 @@ export const AdminDashboard: React.FC = () => {
               </div>
             </div>
 
+            {/* Step 2: Google Workspace Drive & Sheets Account Connection */}
+            <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                  <Cloud className="w-4 h-4 text-emerald-600" />
+                  2. Koneksi Akun Google Drive & Google Sheets
+                </span>
+                {!workspaceNeedsAuth && workspaceUser && getWorkspaceAccessToken() ? (
+                  <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Terhubung: {workspaceUser.email}
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                    Belum terhubung ke sesi Google
+                  </span>
+                )}
+              </div>
+
+              {workspaceNeedsAuth || !getWorkspaceAccessToken() ? (
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                    Masuk dengan akun Google untuk memberikan izin membuat & memperbarui folder Drive serta Google Sheets milik akun tersebut.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={isGoogleSigningIn || isCloudSyncing}
+                    onClick={() => void handleGoogleSignIn()}
+                    className="gsi-material-button flex-shrink-0"
+                  >
+                    <div className="gsi-material-button-state"></div>
+                    <div className="gsi-material-button-content-wrapper">
+                      <div className="gsi-material-button-icon">
+                        <svg
+                          version="1.1"
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 48 48"
+                          style={{ display: 'block' }}
+                        >
+                          <path
+                            fill="#EA4335"
+                            d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                          ></path>
+                          <path
+                            fill="#4285F4"
+                            d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                          ></path>
+                          <path
+                            fill="#FBBC05"
+                            d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                          ></path>
+                          <path
+                            fill="#34A853"
+                            d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                          ></path>
+                          <path fill="none" d="M0 0h48v48H0z"></path>
+                        </svg>
+                      </div>
+                      <span className="gsi-material-button-contents">
+                        {isGoogleSigningIn ? 'Menghubungkan...' : 'Sign in with Google'}
+                      </span>
+                    </div>
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-[11px] text-slate-600 dark:text-slate-300 space-y-1">
+                    <div>
+                      Sesi Google aktif: <strong>{workspaceUser?.email}</strong>
+                    </div>
+                    {isSyncEmailValid &&
+                      workspaceUser?.email &&
+                      workspaceUser.email.toLowerCase() !== syncEmailInput.trim().toLowerCase() && (
+                        <div className="text-amber-600 dark:text-amber-400 flex flex-wrap items-center gap-2">
+                          <span>
+                            Catatan: Email penautan ({syncEmailInput.trim()}) berbeda dengan akun Google yang login.
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setSyncEmailInput(workspaceUser.email || '')}
+                            className="underline font-bold"
+                          >
+                            Samakan dengan {workspaceUser.email}
+                          </button>
+                        </div>
+                      )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleGoogleLogout()}
+                    className="px-3 py-1.5 text-[11px] font-bold rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1.5 transition"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Ganti Akun Google</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
             {/* Live Database Tables Preview */}
             <div className="space-y-2">
               <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                2. Cakupan Seluruh Database Aplikasi (13 Tabel)
+                3. Cakupan Seluruh Database Aplikasi (13 Tabel)
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
                 {[
@@ -784,11 +1058,11 @@ export const AdminDashboard: React.FC = () => {
             </div>
 
             {/* Action Buttons */}
-            <div className="flex flex-wrap items-center gap-3 pt-2">
+            <div className="flex flex-wrap items-center gap-2.5 pt-2">
               <button
                 type="button"
                 disabled={!isSyncEmailValid || isCloudSyncing}
-                onClick={() => void handleRunCloudSync(true)}
+                onClick={() => void handleRunCloudSync(true, true)}
                 className="px-4 py-2.5 text-xs font-bold rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 disabled:opacity-50 transition"
               >
                 Tautkan Email Saja
@@ -796,8 +1070,18 @@ export const AdminDashboard: React.FC = () => {
               <button
                 type="button"
                 disabled={!isSyncEmailValid || isCloudSyncing}
-                onClick={() => void handleRunCloudSync(false)}
-                className="flex-1 px-5 py-2.5 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/25 disabled:opacity-50 flex items-center justify-center gap-2 transition"
+                onClick={() => void handleRunCloudSync(false, true)}
+                className="px-4 py-2.5 text-xs font-bold rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 disabled:opacity-50 transition flex items-center gap-1.5"
+                title="Siapkan & unduh paket Sheets (.xlsx) dan Drive (.json) dari server lokal"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Paket Lokal (.xlsx/.json)</span>
+              </button>
+              <button
+                type="button"
+                disabled={!isSyncEmailValid || isCloudSyncing}
+                onClick={handleRequestCloudSync}
+                className="flex-1 min-w-[220px] px-5 py-2.5 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/25 disabled:opacity-50 flex items-center justify-center gap-2 transition"
               >
                 {isCloudSyncing ? (
                   <>
@@ -807,7 +1091,7 @@ export const AdminDashboard: React.FC = () => {
                 ) : (
                   <>
                     <Cloud className="w-4 h-4" />
-                    <span>Tautkan Email & Sinkronkan Semua Database</span>
+                    <span>Sinkronkan Semua ke Drive & Sheets</span>
                   </>
                 )}
               </button>
@@ -815,8 +1099,58 @@ export const AdminDashboard: React.FC = () => {
 
             {!isSyncEmailValid && (
               <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
-                Tombol sinkronisasi terkunci sampai Anda memasukkan alamat email yang valid.
+                Tombol penautan & sinkronisasi terkunci sampai Anda memasukkan alamat email yang valid.
               </p>
+            )}
+
+            {/* Mandatory Explicit Confirmation Dialog before Mutating/Overwriting Drive & Sheets */}
+            {showSyncConfirmDialog && (
+              <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-300 dark:border-amber-700 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+                  <div className="space-y-1.5 text-xs text-amber-950 dark:text-amber-100">
+                    <div className="font-black text-sm">
+                      Konfirmasi Pembaruan Google Drive & Google Sheets
+                    </div>
+                    <p>
+                      Anda akan membuat/memperbarui folder dan menimpa isi lembar kerja di akun Google{' '}
+                      <strong>{workspaceUser?.email || syncEmailInput.trim()}</strong> (ditautkan ke{' '}
+                      <strong>{syncEmailInput.trim()}</strong>):
+                    </p>
+                    <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
+                      <li>
+                        <strong>Folder Drive:</strong> Presensi_{(settings?.schoolName || 'Yayasan_Mambaul_Ulum').replace(/\s+/g, '_')} (mengunggah file backup JSON baru)
+                      </li>
+                      <li>
+                        <strong>Google Spreadsheet:</strong> Database_{(settings?.schoolName || 'Yayasan_Mambaul_Ulum').replace(/\s+/g, '_')}_{syncEmailInput.trim()}
+                      </li>
+                      <li>
+                        <strong>13 Tabel yang Diperbarui/Ditimpa:</strong> Settings, Users, Teachers, Classes, Students, FaceTemplates, StudentAttendance, TeacherAttendance, ToiletPermits, Locations, AuditLog, ChangeLog, FollowUpNotes
+                      </li>
+                    </ul>
+                    <p className="text-[11px] opacity-85">
+                      Database lokal di server aplikasi tetap aman dan aktif berjalan.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowSyncConfirmDialog(false)}
+                    className="px-4 py-2 text-xs font-bold rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 transition"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRunCloudSync(false, false)}
+                    className="px-4 py-2 text-xs font-bold rounded-xl bg-amber-600 hover:bg-amber-700 text-white shadow-sm flex items-center gap-1.5 transition"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Ya, Konfirmasi & Sinkronkan</span>
+                  </button>
+                </div>
+              </div>
             )}
 
             {/* Result Panel */}
@@ -866,6 +1200,17 @@ export const AdminDashboard: React.FC = () => {
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
                       <span>Buka Folder Drive</span>
+                    </a>
+                  )}
+                  {cloudSyncResult.driveResult?.fileUrl && (
+                    <a
+                      href={cloudSyncResult.driveResult.fileUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-3.5 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white flex items-center gap-1.5 transition"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Buka File Backup Drive</span>
                     </a>
                   )}
                   {cloudSyncResult.exportBundle && (
