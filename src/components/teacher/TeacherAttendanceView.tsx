@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   MapPin,
   Camera,
@@ -37,7 +37,7 @@ export interface TeacherAttendanceViewProps {
 
 export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ onReturnToPortal }) => {
   const { user } = useAuth();
-  const { settings, triggerSync } = useSync();
+  const { settings, faceTemplates: syncedFaceTemplates, faceTemplatesSyncedAt, triggerSync } = useSync();
 
   // Location state
   const [gpsLoading, setGpsLoading] = useState<boolean>(true);
@@ -59,9 +59,16 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
 
   // History & Form
   const [history, setHistory] = useState<TeacherAttendance[]>([]);
-  const [teacherFaceTemplate, setTeacherFaceTemplate] = useState<Array<{ personId: string; descriptor: number[] }>>([]);
+  const [fallbackTeacherTemplates, setFallbackTeacherTemplates] = useState<Array<{ personId: string; descriptor: number[] }>>([]);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  const teacherFaceTemplate = useMemo(() => {
+    if (faceTemplatesSyncedAt) {
+      return syncedFaceTemplates.filter(f => f.personType === 'teacher');
+    }
+    return fallbackTeacherTemplates;
+  }, [faceTemplatesSyncedAt, syncedFaceTemplates, fallbackTeacherTemplates]);
 
   // Leave / Sick modal
   const [showPermitModal, setShowPermitModal] = useState<boolean>(false);
@@ -80,12 +87,13 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
       if (locRes.success && locRes.data) setLocations(locRes.data);
       if (histRes.success && histRes.data) setHistory(histRes.data);
       if (faceRes.success && faceRes.data) {
-        setTeacherFaceTemplate(faceRes.data.filter((f: any) => f.personType === 'teacher'));
+        setFallbackTeacherTemplates(faceRes.data.filter((f: any) => f.personType === 'teacher'));
       }
+      await triggerSync(true);
     } catch (err) {
       console.error('Error loading teacher attendance data:', err);
     }
-  }, []);
+  }, [triggerSync]);
 
   useEffect(() => {
     loadData();

@@ -217,6 +217,30 @@ export async function detectSingleFaceDescriptor(
   }
 }
 
+// Extract face descriptor from an uploaded image or canvas element
+export async function detectFaceDescriptorFromImage(
+  image: HTMLImageElement | HTMLCanvasElement
+): Promise<number[] | null> {
+  if (!modelsLoaded) {
+    await loadFaceDetectionModels();
+  }
+  if (!modelsLoaded) return null;
+
+  try {
+    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.35 });
+    const detection = await faceapi
+      .detectSingleFace(image, options)
+      .withFaceLandmarks(true)
+      .withFaceDescriptor();
+
+    if (!detection || !detection.descriptor) return null;
+    return Array.from(detection.descriptor);
+  } catch (err) {
+    console.error('Image face detection error:', err);
+    return null;
+  }
+}
+
 // Calculate Euclidean distance between two 128-d face descriptors
 export function computeDescriptorDistance(desc1: number[] | Float32Array, desc2: number[] | Float32Array): number {
   if (desc1.length !== desc2.length) return 1.0;

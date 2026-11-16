@@ -208,10 +208,15 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
     }
 
     // --------------------------------------------------------------------------
-    // 3. Real-Time Sync & Polling Endpoint (smart diff via ChangeLog)
+    // 3. Real-Time Sync & Polling Endpoint (smart diff via ChangeLog & live signatures)
     // --------------------------------------------------------------------------
     if (pathname === '/api/sync' && method === 'GET') {
       const since = req.query.since ? String(req.query.since) : '';
+      const clientFaceSig = req.query.faceSig ? String(req.query.faceSig) : '';
+      const clientStudentSig = req.query.studentSig ? String(req.query.studentSig) : '';
+      const clientClassSig = req.query.classSig ? String(req.query.classSig) : '';
+      const force = req.query.force === '1' || !since;
+
       const changeLogs = await getTableRecords<ChangeLog>('ChangeLog');
 
       // Filter changes since timestamp
@@ -221,13 +226,55 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
 
       // Return core active state
       const { dateStr } = getLocalTimeAndDate();
-      const allAttendance = await getTableRecords<StudentAttendance>('StudentAttendance');
-      const todayAttendance = allAttendance.filter(a => a.date === dateStr);
+      const [allAttendance, allPermits, settings, faceTemplates, rawStudents, classes] = await Promise.all([
+        getTableRecords<StudentAttendance>('StudentAttendance'),
+        getTableRecords<ToiletPermit>('ToiletPermits'),
+        getSchoolSettings(),
+        getTableRecords<FaceTemplate>('FaceTemplates'),
+        getTableRecords<Student>('Students'),
+        getTableRecords<SchoolClass>('Classes'),
+      ]);
 
-      const allPermits = await getTableRecords<ToiletPermit>('ToiletPermits');
+      const todayAttendance = allAttendance.filter(a => a.date === dateStr);
       const activePermits = allPermits.filter(p => p.date === dateStr && p.status === 'active');
 
-      const settings = await getSchoolSettings();
+      // Deterministic signatures so any create/update/delete on face database, students, or classes syncs immediately
+      const faceSignature = faceTemplates
+        .map(f => `${f.id}:${f.updatedAt || ''}:${f.personId}`)
+        .sort()
+        .join('|');
+      const enrolledPersonIds = new Set(faceTemplates.map(f => f.personId));
+      const studentSignature = rawStudents
+        .map(s => `${s.id}:${s.updatedAt || ''}:${enrolledPersonIds.has(s.id) ? '1' : '0'}`)
+        .sort()
+        .join('|');
+      const classSignature = classes
+        .map(c => `${c.id}:${c.updatedAt || ''}`)
+        .sort()
+        .join('|');
+
+      const shouldSendFaces =
+        force ||
+        req.query.faceSig === undefined ||
+        clientFaceSig === '__init__' ||
+        clientFaceSig !== faceSignature;
+      const shouldSendStudents =
+        force ||
+        req.query.studentSig === undefined ||
+        clientStudentSig === '__init__' ||
+        clientStudentSig !== studentSignature;
+      const shouldSendClasses =
+        force ||
+        req.query.classSig === undefined ||
+        clientClassSig === '__init__' ||
+        clientClassSig !== classSignature;
+
+      const enrichedStudents = shouldSendStudents
+        ? rawStudents.map(s => ({
+            ...s,
+            hasFaceEnrolled: enrolledPersonIds.has(s.id),
+          }))
+        : undefined;
 
       return jsonResponse({
         success: true,
@@ -235,7 +282,13 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
         todayAttendance,
         activePermits,
         settings,
-        hasChanges: recentChanges.length > 0,
+        faceSignature,
+        studentSignature,
+        classSignature,
+        ...(shouldSendFaces ? { faceTemplates } : {}),
+        ...(shouldSendStudents ? { students: enrichedStudents } : {}),
+        ...(shouldSendClasses ? { classes } : {}),
+        hasChanges: recentChanges.length > 0 || shouldSendFaces || shouldSendStudents || shouldSendClasses,
         changeCount: recentChanges.length,
       });
     }

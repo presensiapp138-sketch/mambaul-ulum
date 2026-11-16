@@ -42,6 +42,7 @@ import {
   acquireCameraStream,
   attachStreamToVideo,
   detectSingleFaceDescriptor,
+  detectFaceDescriptorFromImage,
   parseCameraError,
 } from '../../lib/faceDetection.ts';
 import { CardSkeleton, TableSkeleton } from '../common/Skeleton.tsx';
@@ -50,7 +51,7 @@ import { StudentCardManager } from './StudentCardManager.tsx';
 
 export const AdminDashboard: React.FC = () => {
   const { user } = useAuth();
-  const { settings, updateSettings, triggerSync } = useSync();
+  const { settings, updateSettings, triggerSync, notifyFaceDatabaseChanged } = useSync();
 
   // Tabs
   const [activeTab, setActiveTab] = useState<
@@ -111,6 +112,11 @@ export const AdminDashboard: React.FC = () => {
       setIsLoading(false);
     }
   }, []);
+
+  const handleDataMutated = useCallback(async () => {
+    await loadAdminData();
+    await notifyFaceDatabaseChanged();
+  }, [loadAdminData, notifyFaceDatabaseChanged]);
 
   useEffect(() => {
     loadAdminData();
@@ -474,7 +480,7 @@ export const AdminDashboard: React.FC = () => {
         <UserManagementSection
           users={usersList}
           classes={classes}
-          onRefresh={loadAdminData}
+          onRefresh={handleDataMutated}
         />
       )}
 
@@ -484,7 +490,7 @@ export const AdminDashboard: React.FC = () => {
           students={students}
           teachers={teachers}
           faceTemplates={faceTemplates}
-          onRefresh={loadAdminData}
+          onRefresh={handleDataMutated}
         />
       )}
 
@@ -492,7 +498,7 @@ export const AdminDashboard: React.FC = () => {
       {activeTab === 'locations' && (
         <LocationsSection
           locations={locations}
-          onRefresh={loadAdminData}
+          onRefresh={handleDataMutated}
         />
       )}
 
@@ -502,7 +508,7 @@ export const AdminDashboard: React.FC = () => {
           classes={classes}
           teachers={teachers}
           students={students}
-          onRefresh={loadAdminData}
+          onRefresh={handleDataMutated}
         />
       )}
 
@@ -511,7 +517,7 @@ export const AdminDashboard: React.FC = () => {
         <StudentsSection
           students={students}
           classes={classes}
-          onRefresh={loadAdminData}
+          onRefresh={handleDataMutated}
         />
       )}
 
@@ -520,7 +526,7 @@ export const AdminDashboard: React.FC = () => {
         <BulkUploadSection
           classes={classes}
           onDownloadTemplate={handleDownloadTemplate}
-          onRefresh={loadAdminData}
+          onRefresh={handleDataMutated}
         />
       )}
 
@@ -592,7 +598,7 @@ const FaceDatabaseSection: React.FC<{
   students: Student[];
   teachers: Teacher[];
   faceTemplates: FaceTemplate[];
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
 }> = ({ students, teachers, faceTemplates, onRefresh }) => {
   const [selectedPersonType, setSelectedPersonType] = useState<'student' | 'teacher'>('student');
   const [selectedPersonId, setSelectedPersonId] = useState<string>('');
@@ -600,10 +606,12 @@ const FaceDatabaseSection: React.FC<{
   const [cameraLoading, setCameraLoading] = useState<boolean>(false);
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [searchList, setSearchList] = useState<string>('');
 
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const photoUploadRef = useRef<HTMLInputElement | null>(null);
 
   const enrolledPersonIds = new Set(faceTemplates.map(f => f.personId));
 
@@ -656,7 +664,60 @@ const FaceDatabaseSection: React.FC<{
     }
   };
 
-  // Capture face descriptor and save vector to server
+  const saveDescriptorAndPortrait = async (
+    descriptor: number[],
+    sourceEl: HTMLVideoElement | HTMLImageElement,
+    sourceWidth: number,
+    sourceHeight: number
+  ) => {
+    const res = await apiRequest('/api/face-templates', {
+      method: 'POST',
+      body: JSON.stringify({
+        personId: selectedPersonId,
+        personType: selectedPersonType,
+        descriptor,
+      }),
+    });
+
+    // Automatically capture formal blue background portrait for student card
+    if (selectedPersonType === 'student' && sourceWidth > 0 && sourceHeight > 0) {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 300;
+        canvas.height = 400; // 3:4 portrait
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#1e40af'; // Formal Indonesian student blue background
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          const cropW = Math.min(sourceWidth, sourceHeight * 0.75);
+          const cropH = cropW * (4 / 3);
+          const startX = Math.max(0, (sourceWidth - cropW) / 2);
+          const startY = Math.max(0, (sourceHeight - cropH) / 2);
+
+          ctx.drawImage(sourceEl, startX, startY, cropW, Math.min(cropH, sourceHeight - startY), 0, 0, 300, 400);
+          const bluePhotoDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+
+          await apiRequest(`/api/students/${selectedPersonId}`, {
+            method: 'PUT',
+            body: JSON.stringify({ photoUrl: bluePhotoDataUrl }),
+          });
+        }
+      } catch (photoErr) {
+        console.warn('Could not generate card photo thumbnail:', photoErr);
+      }
+    }
+
+    if (res.success) {
+      setMessage('Wajah berhasil didaftarkan & langsung tersinkron ke seluruh perangkat deteksi wajah!');
+      stopCamera();
+      await onRefresh();
+    } else {
+      alert(res.error || 'Gagal menyimpan template wajah.');
+    }
+  };
+
+  // Capture face descriptor from live camera and save vector to server
   const handleEnrollFace = async () => {
     if (!selectedPersonId || !videoRef.current) return;
     setIsCapturing(true);
@@ -666,62 +727,71 @@ const FaceDatabaseSection: React.FC<{
       const descriptor = await detectSingleFaceDescriptor(videoRef.current);
       if (!descriptor) {
         alert('Wajah tidak terdeteksi jelas. Posisikan wajah di tengah kamera.');
-        setIsCapturing(false);
         return;
       }
 
-      // Save 128 float descriptor vector
-      const res = await apiRequest('/api/face-templates', {
-        method: 'POST',
-        body: JSON.stringify({
-          personId: selectedPersonId,
-          personType: selectedPersonType,
-          descriptor,
-        }),
-      });
-
-      // Automatically capture formal blue background portrait for student card
-      if (selectedPersonType === 'student' && videoRef.current) {
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = 300;
-          canvas.height = 400; // 3:4 portrait
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.fillStyle = '#1e40af'; // Formal Indonesian student blue background
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            const vw = videoRef.current.videoWidth || 640;
-            const vh = videoRef.current.videoHeight || 480;
-            const cropW = Math.min(vw, vh * 0.75);
-            const cropH = cropW * (4 / 3);
-            const startX = Math.max(0, (vw - cropW) / 2);
-            const startY = Math.max(0, (vh - cropH) / 2);
-
-            ctx.drawImage(videoRef.current, startX, startY, cropW, Math.min(cropH, vh - startY), 0, 0, 300, 400);
-            const bluePhotoDataUrl = canvas.toDataURL('image/jpeg', 0.92);
-
-            await apiRequest(`/api/students/${selectedPersonId}`, {
-              method: 'PUT',
-              body: JSON.stringify({ photoUrl: bluePhotoDataUrl }),
-            });
-          }
-        } catch (photoErr) {
-          console.warn('Could not generate card photo thumbnail:', photoErr);
-        }
-      }
-
-      if (res.success) {
-        setMessage('Wajah berhasil didaftarkan! Vektor 128 float dan foto pas kartu berlatar biru otomatis diperbarui.');
-        stopCamera();
-        onRefresh();
-      } else {
-        alert(res.error || 'Gagal menyimpan template wajah.');
-      }
+      const vw = videoRef.current.videoWidth || 640;
+      const vh = videoRef.current.videoHeight || 480;
+      await saveDescriptorAndPortrait(descriptor, videoRef.current, vw, vh);
     } finally {
       setIsCapturing(false);
     }
   };
+
+  // Upload photo file and extract face descriptor directly
+  const handleUploadPhotoEnroll = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedPersonId) return;
+
+    setIsCapturing(true);
+    setMessage(null);
+
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = dataUrl;
+      });
+
+      const descriptor = await detectFaceDescriptorFromImage(img);
+      if (!descriptor) {
+        alert('Wajah tidak terdeteksi jelas pada foto. Pastikan foto menghadap depan dan cukup terang.');
+        return;
+      }
+
+      await saveDescriptorAndPortrait(descriptor, img, img.naturalWidth || img.width, img.naturalHeight || img.height);
+    } catch (err: any) {
+      alert(err?.message || 'Gagal memproses foto wajah.');
+    } finally {
+      setIsCapturing(false);
+      if (photoUploadRef.current) {
+        photoUploadRef.current.value = '';
+      }
+    }
+  };
+
+  const displayList = selectedPersonType === 'student'
+    ? students.filter(s =>
+        !searchList ||
+        s.name.toLowerCase().includes(searchList.toLowerCase()) ||
+        s.nis.includes(searchList)
+      )
+    : teachers.filter(t =>
+        !searchList ||
+        t.name.toLowerCase().includes(searchList.toLowerCase()) ||
+        t.nip.includes(searchList)
+      );
+
+  const studentTemplatesCount = faceTemplates.filter(f => !f.personType || f.personType === 'student').length;
+  const teacherTemplatesCount = faceTemplates.filter(f => f.personType === 'teacher').length;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -730,12 +800,12 @@ const FaceDatabaseSection: React.FC<{
         <div>
           <h3 className="text-base font-bold text-slate-900 dark:text-white">Pendaftaran Wajah Baru (Biometric)</h3>
           <p className="text-xs text-slate-500">
-            Kamera memproses di browser dan hanya menyimpan 128 angka (vektor). Foto gambar tidak pernah disimpan.
+            Vektor wajah 128 angka otomatis tersinkron real-time ke Kios Presensi Siswa & Presensi Guru.
           </p>
         </div>
 
         {message && (
-          <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs">
+          <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
             {message}
           </div>
         )}
@@ -754,7 +824,7 @@ const FaceDatabaseSection: React.FC<{
                   : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
               }`}
             >
-              Wajah Siswa
+              Wajah Siswa ({studentTemplatesCount})
             </button>
             <button
               type="button"
@@ -768,7 +838,7 @@ const FaceDatabaseSection: React.FC<{
                   : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
               }`}
             >
-              Wajah Guru
+              Wajah Guru ({teacherTemplatesCount})
             </button>
           </div>
 
@@ -805,17 +875,36 @@ const FaceDatabaseSection: React.FC<{
               className={`w-full max-w-sm rounded-xl ${isCameraActive ? 'block' : 'hidden'}`}
             />
             {!isCameraActive && (
-              <div className="text-center p-6 space-y-2">
+              <div className="text-center p-6 space-y-3">
                 <Camera className="w-10 h-10 text-slate-500 mx-auto" />
-                <p className="text-xs text-slate-400">Tekan tombol di bawah untuk menyalakan kamera</p>
-                <button
-                  type="button"
-                  onClick={() => startCamera()}
-                  disabled={!selectedPersonId || cameraLoading}
-                  className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl disabled:opacity-50"
-                >
-                  {cameraLoading ? 'Membuka Kamera...' : 'Nyalakan Kamera Pendaftaran'}
-                </button>
+                <p className="text-xs text-slate-400">
+                  Pilih nama terlebih dahulu, lalu nyalakan kamera atau upload foto wajah
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => startCamera()}
+                    disabled={!selectedPersonId || cameraLoading || isCapturing}
+                    className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl disabled:opacity-50"
+                  >
+                    {cameraLoading ? 'Membuka Kamera...' : 'Nyalakan Kamera'}
+                  </button>
+                  <label
+                    className={`px-4 py-2 text-xs font-bold rounded-xl border border-slate-600 text-slate-200 hover:bg-slate-800 cursor-pointer transition ${
+                      !selectedPersonId || isCapturing ? 'opacity-50 pointer-events-none' : ''
+                    }`}
+                  >
+                    <span>{isCapturing ? 'Memproses Foto...' : 'Upload Foto Wajah'}</span>
+                    <input
+                      ref={photoUploadRef}
+                      type="file"
+                      accept="image/*"
+                      disabled={!selectedPersonId || isCapturing}
+                      onChange={handleUploadPhotoEnroll}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
               </div>
             )}
           </div>
@@ -851,22 +940,32 @@ const FaceDatabaseSection: React.FC<{
 
       {/* Right List: Status Terdaftar / Belum */}
       <div className="lg:col-span-6 p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
-        <h3 className="text-base font-bold text-slate-900 dark:text-white">
-          Status Pendaftaran Biometric ({faceTemplates.length} Wajah Terdaftar)
-        </h3>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <h3 className="text-base font-bold text-slate-900 dark:text-white">
+            Database Wajah {selectedPersonType === 'student' ? 'Siswa' : 'Guru'} ({selectedPersonType === 'student' ? studentTemplatesCount : teacherTemplatesCount} Terdaftar)
+          </h3>
+          <input
+            type="text"
+            value={searchList}
+            onChange={e => setSearchList(e.target.value)}
+            placeholder={selectedPersonType === 'student' ? 'Cari siswa / NIS...' : 'Cari guru / NIP...'}
+            className="px-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+          />
+        </div>
 
         <div className="space-y-2 max-h-[500px] overflow-y-auto">
-          {students.map(s => {
-            const isEnrolled = enrolledPersonIds.has(s.id);
-            const template = faceTemplates.find(f => f.personId === s.id);
+          {displayList.map((person: any) => {
+            const isEnrolled = enrolledPersonIds.has(person.id);
+            const template = faceTemplates.find(f => f.personId === person.id);
+            const codeLabel = selectedPersonType === 'student' ? `NIS: ${person.nis} • Siswa` : `NIP: ${person.nip} • Guru`;
             return (
               <div
-                key={s.id}
+                key={person.id}
                 className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs"
               >
                 <div>
-                  <div className="font-bold text-slate-900 dark:text-white">{s.name}</div>
-                  <div className="text-[11px] text-slate-400">NIS: {s.nis} • Siswa</div>
+                  <div className="font-bold text-slate-900 dark:text-white">{person.name}</div>
+                  <div className="text-[11px] text-slate-400">{codeLabel}</div>
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -877,15 +976,15 @@ const FaceDatabaseSection: React.FC<{
                         : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-400'
                     }`}
                   >
-                    {isEnrolled ? 'Terdaftar' : 'Belum'}
+                    {isEnrolled ? 'Terdaftar & Sinkron' : 'Belum'}
                   </span>
 
                   {template && (
                     <button
                       onClick={async () => {
-                        if (confirm(`Hapus data wajah ${s.name}?`)) {
+                        if (confirm(`Hapus data wajah ${person.name}?`)) {
                           await apiRequest(`/api/face-templates/${template.id}`, { method: 'DELETE' });
-                          onRefresh();
+                          await onRefresh();
                         }
                       }}
                       className="p-1 text-slate-400 hover:text-red-600 transition"

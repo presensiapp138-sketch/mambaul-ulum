@@ -717,6 +717,7 @@ export async function appendRecord<T extends { id: string; updatedAt?: string }>
       timestamp: now,
       updatedBy,
     });
+    delete cacheStore['table_ChangeLog'];
     return fullRecord;
   }
 
@@ -782,6 +783,7 @@ export async function updateRecord<T extends { id: string; updatedAt?: string }>
       timestamp: now,
       updatedBy,
     });
+    delete cacheStore['table_ChangeLog'];
 
     return updated;
   }
@@ -878,6 +880,7 @@ export async function deleteRecord(
         timestamp: now,
         updatedBy,
       });
+      delete cacheStore['table_ChangeLog'];
       return true;
     }
     return false;
@@ -947,6 +950,8 @@ async function recordChangeLog(
     timestamp: new Date().toISOString(),
     updatedBy,
   };
+
+  delete cacheStore['table_ChangeLog'];
 
   try {
     if (!isGoogleSheetsConfigured()) {

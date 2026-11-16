@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import confetti from 'canvas-confetti';
 import {
   Camera,
@@ -40,7 +40,16 @@ export interface StudentKioskViewProps {
 }
 
 export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPortal }) => {
-  const { settings, todayAttendance, activePermits, triggerSync } = useSync();
+  const {
+    settings,
+    todayAttendance,
+    activePermits,
+    faceTemplates: syncedFaceTemplates,
+    students: syncedStudents,
+    classes: syncedClasses,
+    faceTemplatesSyncedAt,
+    triggerSync,
+  } = useSync();
 
   // Kiosk flow states
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
@@ -58,10 +67,19 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
   const isDetectingRef = useRef<boolean>(false);
   const lastDetectTimeRef = useRef<number>(0);
 
-  // Cached face templates and student list
-  const [students, setStudents] = useState<Student[]>([]);
-  const [classes, setClasses] = useState<SchoolClass[]>([]);
-  const [faceTemplates, setFaceTemplates] = useState<Array<{ personId: string; descriptor: number[] }>>([]);
+  // Fallback state until first SyncContext payload resolves
+  const [localStudents, setLocalStudents] = useState<Student[]>([]);
+  const [localClasses, setLocalClasses] = useState<SchoolClass[]>([]);
+  const [localFaceTemplates, setLocalFaceTemplates] = useState<
+    Array<{ personId: string; personType?: string; descriptor: number[] }>
+  >([]);
+
+  const students = faceTemplatesSyncedAt ? syncedStudents : localStudents;
+  const classes = faceTemplatesSyncedAt ? syncedClasses : localClasses;
+  const studentFaceTemplates = useMemo(() => {
+    const source = faceTemplatesSyncedAt ? syncedFaceTemplates : localFaceTemplates;
+    return source.filter(f => !f.personType || f.personType === 'student');
+  }, [faceTemplatesSyncedAt, syncedFaceTemplates, localFaceTemplates]);
 
   // Current detected students in frame
   const [detectedStudentsInFrame, setDetectedStudentsInFrame] = useState<Array<{ student: Student; distance: number }>>([]);
@@ -103,33 +121,36 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
     return () => clearInterval(timer);
   }, []);
 
-  // Fetch initial students, classes, and face templates
+  // Trigger immediate full sync + initial fallback load on kiosk mount
   const fetchData = useCallback(async () => {
     try {
-      const [stdRes, clsRes, faceRes] = await Promise.all([
-        apiRequest<Student[]>('/api/students'),
-        apiRequest<SchoolClass[]>('/api/classes'),
-        apiRequest<Array<{ personId: string; descriptor: number[] }>>('/api/face-templates'),
-      ]);
-      if (stdRes.success && stdRes.data) setStudents(stdRes.data);
-      if (clsRes.success && clsRes.data) setClasses(clsRes.data);
-      if (faceRes.success && faceRes.data) setFaceTemplates(faceRes.data);
+      await triggerSync(true);
+      if (!faceTemplatesSyncedAt) {
+        const [stdRes, clsRes, faceRes] = await Promise.all([
+          apiRequest<Student[]>('/api/students'),
+          apiRequest<SchoolClass[]>('/api/classes'),
+          apiRequest<Array<{ personId: string; personType?: string; descriptor: number[] }>>('/api/face-templates'),
+        ]);
+        if (stdRes.success && stdRes.data) setLocalStudents(stdRes.data);
+        if (clsRes.success && clsRes.data) setLocalClasses(clsRes.data);
+        if (faceRes.success && faceRes.data) setLocalFaceTemplates(faceRes.data);
+      }
     } catch (e) {
       console.error('Failed to load kiosk data:', e);
     }
-  }, []);
+  }, [triggerSync, faceTemplatesSyncedAt]);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
   }, [fetchData]);
 
-  // Keep refs synced so detection loop always reads latest data without restarting
+  // Keep refs synced immediately so detection loop always matches against the latest face database
   const studentsRef = useRef<Student[]>([]);
   const classesRef = useRef<SchoolClass[]>([]);
   const faceTemplatesRef = useRef<Array<{ personId: string; descriptor: number[] }>>([]);
-  useEffect(() => { studentsRef.current = students; }, [students]);
-  useEffect(() => { classesRef.current = classes; }, [classes]);
-  useEffect(() => { faceTemplatesRef.current = faceTemplates; }, [faceTemplates]);
+  studentsRef.current = students;
+  classesRef.current = classes;
+  faceTemplatesRef.current = studentFaceTemplates;
 
   // Preload face models in background immediately on kiosk mount
   useEffect(() => {
@@ -343,8 +364,8 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
 
       // Check face verification:
       // If camera is running and face templates exist, verify that the scanned student is among the detected faces in frame!
-      if (isCameraActive && faceTemplates.length > 0) {
-        const studentHasTemplate = faceTemplates.some(t => t.personId === matchedStudent.id);
+      if (isCameraActive && studentFaceTemplates.length > 0) {
+        const studentHasTemplate = studentFaceTemplates.some(t => t.personId === matchedStudent.id);
         if (studentHasTemplate && detectedStudentsInFrame.length > 0) {
           const studentFacePresent = detectedStudentsInFrame.some(
             d => d.student.id === matchedStudent.id
@@ -409,7 +430,7 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
         });
       }
     },
-    [students, faceTemplates, isCameraActive, detectedStudentsInFrame, soundEnabled, triggerSync]
+    [students, studentFaceTemplates, isCameraActive, detectedStudentsInFrame, soundEnabled, triggerSync]
   );
 
   // Hardware Scanner USB / RFID Hook (Auto-submits instantly on match or after 80ms scanner stream, no Enter required)
@@ -498,7 +519,7 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
             />
             <canvas
               ref={canvasRef}
-              className={`absolute inset-0 w-full h-full pointer-events-none ${isCameraActive ? 'block' : 'hidden'}`}
+              className={`absolute inset-0 w-full h-full object-cover rounded-3xl pointer-events-none ${isCameraActive ? 'block' : 'hidden'}`}
             />
 
             {/* Inactive State: "Mulai Presensi" Button */}
@@ -546,12 +567,12 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
 
             {/* Controls Bar over Active Video */}
             {isCameraActive && (
-              <div className="absolute top-4 left-4 right-4 flex items-center justify-between pointer-events-auto">
+              <div className="absolute top-4 left-4 right-4 flex flex-wrap items-center justify-between gap-2 pointer-events-auto">
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/60 backdrop-blur-md text-white text-xs font-medium border border-white/10">
                   <span className={`w-2 h-2 rounded-full animate-pulse ${modelStatus === 'ready' ? 'bg-emerald-500' : 'bg-amber-400'}`} />
                   <span>
                     {modelStatus === 'ready'
-                      ? 'Kamera Aktif • Deteksi Realtime'
+                      ? `Deteksi Realtime • ${studentFaceTemplates.length} Wajah Tersinkron`
                       : modelStatus === 'error'
                       ? 'Kamera Aktif • Mode Scan Kartu'
                       : 'Kamera Aktif • Menyiapkan AI...'}
@@ -559,6 +580,13 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
                 </div>
 
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void triggerSync(true)}
+                    className="p-2 rounded-xl bg-black/60 backdrop-blur-md text-white hover:bg-black/80 border border-white/10 transition"
+                    title="Sinkronkan Database Wajah Sekarang"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
                   <button
                     onClick={switchCamera}
                     className="p-2 rounded-xl bg-black/60 backdrop-blur-md text-white hover:bg-black/80 border border-white/10 transition"
@@ -576,13 +604,34 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
               </div>
             )}
 
+            {/* Live Recognized Face Overlay Banner */}
+            {isCameraActive && detectedStudentsInFrame.length > 0 && (
+              <div className="absolute bottom-14 left-4 right-4 flex flex-wrap gap-2 pointer-events-none">
+                {detectedStudentsInFrame.map(({ student }) => {
+                  const clsName = classes.find(c => c.id === student.classId)?.name;
+                  return (
+                    <div
+                      key={student.id}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600/90 backdrop-blur-md text-white text-xs font-bold shadow-lg border border-emerald-400/40 flex items-center gap-2"
+                    >
+                      <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                      <span>
+                        {student.name}
+                        {clsName ? ` (${clsName})` : ''} • Wajah Cocok
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             {/* Privacy Badge overlay */}
             <div className="absolute bottom-3 left-4 right-4 flex items-center justify-between text-[11px] text-slate-400 bg-black/50 backdrop-blur-md px-3.5 py-1.5 rounded-xl border border-white/5 pointer-events-none">
               <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
                 <ShieldCheck className="w-3.5 h-3.5" />
                 Privasi Terjamin: Video hanya di browser, tidak ada foto disimpan.
               </span>
-              <span>Model: Local TinyFace</span>
+              <span>DB Wajah: {studentFaceTemplates.length} Siswa</span>
             </div>
           </div>
 
