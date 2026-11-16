@@ -170,6 +170,10 @@ export interface SchoolSettings {
   foundationQrCodeUrl?: string;
   levelConfigsJson?: string;
   levels?: Record<EducationLevel, LevelConfig>;
+  syncTargetEmail?: string;
+  syncLinkedSpreadsheetId?: string;
+  syncLinkedFolderId?: string;
+  lastCloudSyncAt?: string;
 }
 
 export interface FaceTemplate {

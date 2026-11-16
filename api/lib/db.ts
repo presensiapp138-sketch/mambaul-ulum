@@ -31,8 +31,8 @@ export const SHEET_HEADERS: Record<string, string[]> = {
   Settings: ['id', 'key', 'value', 'createdAt', 'updatedAt', 'updatedBy'],
   Users: ['id', 'username', 'passwordHash', 'role', 'name', 'email', 'classId', 'isActive', 'createdAt', 'updatedAt', 'updatedBy'],
   Teachers: ['id', 'nip', 'name', 'email', 'phone', 'subject', 'isActive', 'createdAt', 'updatedAt', 'updatedBy'],
-  Classes: ['id', 'name', 'grade', 'academicYear', 'homeRoomTeacherId', 'createdAt', 'updatedAt', 'updatedBy'],
-  Students: ['id', 'nis', 'nisn', 'name', 'gender', 'classId', 'barcodeCard', 'parentPhone', 'isActive', 'createdAt', 'updatedAt', 'updatedBy'],
+  Classes: ['id', 'name', 'grade', 'academicYear', 'homeRoomTeacherId', 'createdAt', 'updatedAt', 'updatedBy', 'level'],
+  Students: ['id', 'nis', 'nisn', 'name', 'gender', 'classId', 'barcodeCard', 'parentPhone', 'isActive', 'createdAt', 'updatedAt', 'updatedBy', 'photoUrl', 'level', 'birthPlace', 'birthDate', 'address', 'bloodType'],
   FaceTemplates: ['id', 'personId', 'personType', 'descriptor', 'createdAt', 'updatedAt', 'updatedBy'],
   StudentAttendance: ['id', 'studentId', 'date', 'timeIn', 'status', 'method', 'notes', 'createdAt', 'updatedAt', 'updatedBy'],
   TeacherAttendance: ['id', 'teacherId', 'date', 'timeIn', 'timeOut', 'status', 'method', 'latitude', 'longitude', 'distanceMeters', 'photoDriveUrl', 'notes', 'createdAt', 'updatedAt', 'updatedBy'],
@@ -66,6 +66,10 @@ function getInitialSeedData(): DatabaseSchema {
       foundationWatermarkUrl: '',
       foundationQrCodeUrl: '',
       levelConfigsJson: '',
+      syncTargetEmail: '',
+      syncLinkedSpreadsheetId: '',
+      syncLinkedFolderId: '',
+      lastCloudSyncAt: '',
     },
     Users: [
       {
@@ -445,6 +449,18 @@ function getMemoryStore(): DatabaseSchema {
   return _memoryStore;
 }
 
+export function isValidSyncEmail(email?: string): boolean {
+  if (!email) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
+
+export function isServiceAccountConfigured(): boolean {
+  return Boolean(
+    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
+    process.env.GOOGLE_PRIVATE_KEY
+  );
+}
+
 export function isGoogleSheetsConfigured(): boolean {
   return Boolean(
     process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
@@ -453,7 +469,7 @@ export function isGoogleSheetsConfigured(): boolean {
   );
 }
 
-function getGoogleSheetsClient(): sheets_v4.Sheets | null {
+function getGoogleServiceAuth() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   let privateKey = process.env.GOOGLE_PRIVATE_KEY;
   if (!email || !privateKey) return null;
@@ -463,7 +479,7 @@ function getGoogleSheetsClient(): sheets_v4.Sheets | null {
     privateKey = privateKey.replace(/\\n/g, '\n');
   }
 
-  const auth = new google.auth.JWT({
+  return new google.auth.JWT({
     email,
     key: privateKey,
     scopes: [
@@ -471,7 +487,11 @@ function getGoogleSheetsClient(): sheets_v4.Sheets | null {
       'https://www.googleapis.com/auth/drive',
     ],
   });
+}
 
+function getGoogleSheetsClient(): sheets_v4.Sheets | null {
+  const auth = getGoogleServiceAuth();
+  if (!auth) return null;
   return google.sheets({ version: 'v4', auth });
 }
 
@@ -1072,6 +1092,238 @@ export async function getSchoolSettings(): Promise<SchoolSettings> {
     foundationWatermarkUrl: map.foundationWatermarkUrl || '',
     foundationQrCodeUrl: map.foundationQrCodeUrl || '',
     levelConfigsJson: map.levelConfigsJson || '',
+    syncTargetEmail: map.syncTargetEmail || '',
+    syncLinkedSpreadsheetId: map.syncLinkedSpreadsheetId || '',
+    syncLinkedFolderId: map.syncLinkedFolderId || '',
+    lastCloudSyncAt: map.lastCloudSyncAt || '',
+  };
+}
+
+// Collect all 13 tables in Google Sheets-compatible row arrays
+export async function getAllDatabaseTablesExport(targetEmail: string, exportedBy: string = 'admin') {
+  const now = new Date().toISOString();
+  const settings = await getSchoolSettings();
+
+  const settingsEntries = Object.entries({
+    ...getInitialSeedData().Settings,
+    schoolName: settings.schoolName,
+    schoolLogo: settings.schoolLogo,
+    academicYear: settings.academicYear,
+    checkInTime: settings.checkInTime,
+    lateCutoffTime: settings.lateCutoffTime,
+    checkOutTime: settings.checkOutTime,
+    toiletMaxMinutes: String(settings.toiletMaxMinutes),
+    warningThresholdAbsent: String(settings.warningThresholdAbsent),
+    warningThresholdLate: String(settings.warningThresholdLate),
+    warningThresholdToilet: String(settings.warningThresholdToilet),
+    teacherPhotoProofEnabled: String(settings.teacherPhotoProofEnabled),
+    parentNotificationEnabled: String(settings.parentNotificationEnabled),
+    holidays: JSON.stringify(settings.holidays || []),
+    foundationAddress: settings.foundationAddress || '',
+    foundationWebsite: settings.foundationWebsite || '',
+    foundationWatermarkUrl: settings.foundationWatermarkUrl || '',
+    foundationQrCodeUrl: settings.foundationQrCodeUrl || '',
+    levelConfigsJson: settings.levelConfigsJson || '',
+    syncTargetEmail: targetEmail,
+    syncLinkedSpreadsheetId: settings.syncLinkedSpreadsheetId || '',
+    syncLinkedFolderId: settings.syncLinkedFolderId || '',
+    lastCloudSyncAt: now,
+  }).map(([key, value], idx) => ({
+    id: `set-${idx + 1}`,
+    key,
+    value,
+    createdAt: now,
+    updatedAt: now,
+    updatedBy: exportedBy,
+  }));
+
+  const arrayTableNames = [
+    'Users',
+    'Teachers',
+    'Classes',
+    'Students',
+    'FaceTemplates',
+    'StudentAttendance',
+    'TeacherAttendance',
+    'ToiletPermits',
+    'Locations',
+    'AuditLog',
+    'ChangeLog',
+    'FollowUpNotes',
+  ] as const;
+
+  const tablesData: Record<string, Record<string, unknown>[]> = {
+    Settings: settingsEntries,
+  };
+
+  for (const table of arrayTableNames) {
+    tablesData[table] = await getTableRecords<Record<string, unknown>>(table);
+  }
+
+  const tableCounts: Record<string, number> = {};
+  const sheetsRows: Record<string, string[][]> = {};
+
+  for (const [tableName, headers] of Object.entries(SHEET_HEADERS)) {
+    const records = tablesData[tableName] || [];
+    tableCounts[tableName] = records.length;
+    const rows = records.map(rec =>
+      headers.map(h => {
+        const val = rec[h];
+        if (val === undefined || val === null) return '';
+        if (typeof val === 'object') return JSON.stringify(val);
+        return String(val);
+      })
+    );
+    sheetsRows[tableName] = [headers, ...rows];
+  }
+
+  return {
+    linkedEmail: targetEmail,
+    exportedAt: now,
+    exportedBy,
+    tableCounts,
+    tablesData,
+    sheetsRows,
+  };
+}
+
+// Push all 13 tables to Google Sheets & link/share with the entered targetEmail
+export async function syncAllTablesToGoogleSheets(
+  targetEmail: string,
+  updatedBy: string = 'admin',
+  customSpreadsheetId?: string
+): Promise<{
+  success: boolean;
+  cloudSynced: boolean;
+  linkedEmail: string;
+  spreadsheetId?: string;
+  spreadsheetUrl?: string;
+  tableCounts: Record<string, number>;
+  sheetsSynced: string[];
+  message: string;
+}> {
+  const cleanEmail = targetEmail.trim();
+  if (!isValidSyncEmail(cleanEmail)) {
+    throw new Error('Alamat email tidak valid. Masukkan email yang valid sebelum menyinkronkan database.');
+  }
+
+  const currentSettings = await getSchoolSettings();
+  await updateSchoolSetting('syncTargetEmail', cleanEmail, updatedBy);
+
+  const exportBundle = await getAllDatabaseTablesExport(cleanEmail, updatedBy);
+  const now = new Date().toISOString();
+
+  if (!isServiceAccountConfigured()) {
+    await updateSchoolSetting('lastCloudSyncAt', now, updatedBy);
+    return {
+      success: true,
+      cloudSynced: false,
+      linkedEmail: cleanEmail,
+      tableCounts: exportBundle.tableCounts,
+      sheetsSynced: Object.keys(SHEET_HEADERS),
+      message: `Email "${cleanEmail}" tertaut! Seluruh ${Object.keys(SHEET_HEADERS).length} tabel database siap disinkronkan (mode lokal aktif; unduh workbook Sheet & Backup Drive tersedia).`,
+    };
+  }
+
+  const auth = getGoogleServiceAuth();
+  if (!auth) {
+    throw new Error('Kredensial Google Service Account tidak dapat diinisialisasi.');
+  }
+  const sheets = google.sheets({ version: 'v4', auth });
+  const drive = google.drive({ version: 'v3', auth });
+
+  let spreadsheetId =
+    (customSpreadsheetId && customSpreadsheetId.trim()) ||
+    currentSettings.syncLinkedSpreadsheetId ||
+    process.env.SPREADSHEET_ID ||
+    '';
+
+  if (!spreadsheetId) {
+    // Create a brand new spreadsheet linked to this email
+    const created = await sheets.spreadsheets.create({
+      requestBody: {
+        properties: {
+          title: `Database_${currentSettings.schoolName.replace(/\s+/g, '_')}_${cleanEmail}`,
+        },
+        sheets: Object.keys(SHEET_HEADERS).map(title => ({
+          properties: { title, gridProperties: { rowCount: 2000, columnCount: 22 } },
+        })),
+      },
+    });
+    spreadsheetId = created.data.spreadsheetId || '';
+  }
+
+  if (!spreadsheetId) {
+    throw new Error('Gagal menentukan atau membuat Google Spreadsheet.');
+  }
+
+  // Share spreadsheet with the entered email so it links directly to their Google account
+  try {
+    await drive.permissions.create({
+      fileId: spreadsheetId,
+      sendNotificationEmail: false,
+      requestBody: {
+        type: 'user',
+        role: 'writer',
+        emailAddress: cleanEmail,
+      },
+    });
+  } catch (permErr) {
+    console.warn(`Could not grant permission directly for ${cleanEmail} on sheet ${spreadsheetId}:`, permErr);
+  }
+
+  // Ensure all 13 sheet tabs exist
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+  const existingSheetTitles = meta.data.sheets?.map(s => s.properties?.title || '') || [];
+  const addRequests: sheets_v4.Schema$Request[] = [];
+
+  for (const sheetName of Object.keys(SHEET_HEADERS)) {
+    if (!existingSheetTitles.includes(sheetName)) {
+      addRequests.push({
+        addSheet: {
+          properties: {
+            title: sheetName,
+            gridProperties: { rowCount: 2000, columnCount: 22 },
+          },
+        },
+      });
+    }
+  }
+
+  if (addRequests.length > 0) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: addRequests },
+    });
+  }
+
+  // Sync all 13 tables cleanly
+  for (const sheetName of Object.keys(SHEET_HEADERS)) {
+    const matrix = exportBundle.sheetsRows[sheetName];
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId,
+      range: `'${sheetName}'!A:Z`,
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: matrix },
+    });
+  }
+
+  await updateSchoolSetting('syncLinkedSpreadsheetId', spreadsheetId, updatedBy);
+  await updateSchoolSetting('lastCloudSyncAt', now, updatedBy);
+
+  return {
+    success: true,
+    cloudSynced: true,
+    linkedEmail: cleanEmail,
+    spreadsheetId,
+    spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
+    tableCounts: exportBundle.tableCounts,
+    sheetsSynced: Object.keys(SHEET_HEADERS),
+    message: `Seluruh ${Object.keys(SHEET_HEADERS).length} tabel database berhasil disinkronkan ke Google Sheets & ditautkan ke ${cleanEmail}!`,
   };
 }
 

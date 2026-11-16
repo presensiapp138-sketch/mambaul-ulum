@@ -23,6 +23,10 @@ import {
   KeyRound,
   Eye,
   CheckCircle2,
+  Mail,
+  Cloud,
+  ExternalLink,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { useSync } from '../../context/SyncContext.tsx';
@@ -85,6 +89,15 @@ export const AdminDashboard: React.FC = () => {
     onConfirm: () => {},
   });
 
+  // Drive & Sheets Email-Linked Sync Modal state
+  const [showCloudSyncModal, setShowCloudSyncModal] = useState<boolean>(false);
+  const [syncEmailInput, setSyncEmailInput] = useState<string>('');
+  const [syncSpreadsheetIdInput, setSyncSpreadsheetIdInput] = useState<string>('');
+  const [syncFolderIdInput, setSyncFolderIdInput] = useState<string>('');
+  const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+  const [cloudSyncResult, setCloudSyncResult] = useState<any | null>(null);
+
   // Load all admin data
   const loadAdminData = useCallback(async () => {
     setIsLoading(true);
@@ -125,8 +138,19 @@ export const AdminDashboard: React.FC = () => {
   useEffect(() => {
     if (settings) {
       setSettingsForm(settings);
+      if (settings.syncTargetEmail && !syncEmailInput) {
+        setSyncEmailInput(settings.syncTargetEmail);
+      }
+      if (settings.syncLinkedSpreadsheetId && !syncSpreadsheetIdInput) {
+        setSyncSpreadsheetIdInput(settings.syncLinkedSpreadsheetId);
+      }
+      if (settings.syncLinkedFolderId && !syncFolderIdInput) {
+        setSyncFolderIdInput(settings.syncLinkedFolderId);
+      }
     }
   }, [settings]);
+
+  const isSyncEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(syncEmailInput.trim());
 
   // Save Settings
   const handleSaveSettings = async (e: React.FormEvent) => {
@@ -138,26 +162,82 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  // Trigger Google Sheets Init / Migration
-  const handleInitSheets = async () => {
+  // Open Email-Linked Drive & Sheets Sync Modal
+  const openCloudSyncModal = () => {
+    setCloudSyncError(null);
+    if (settings?.syncTargetEmail) {
+      setSyncEmailInput(settings.syncTargetEmail);
+    }
+    if (settings?.syncLinkedSpreadsheetId) {
+      setSyncSpreadsheetIdInput(settings.syncLinkedSpreadsheetId);
+    }
+    if (settings?.syncLinkedFolderId) {
+      setSyncFolderIdInput(settings.syncLinkedFolderId);
+    }
+    setShowCloudSyncModal(true);
+  };
+
+  // Execute Link & Full Sync to Drive & Sheets (Requires Email First)
+  const handleRunCloudSync = async (linkOnly: boolean = false) => {
+    const cleanEmail = syncEmailInput.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setCloudSyncError('Harap masukkan alamat email yang valid terlebih dahulu sebelum menyinkronkan ke Drive & Sheets.');
+      return;
+    }
+
+    setIsCloudSyncing(true);
+    setCloudSyncError(null);
+
     try {
-      const res = await apiRequest('/api/sheets/init', { method: 'POST' });
-      alert(res.message || 'Inisialisasi tabel Google Sheets selesai!');
-      loadAdminData();
-      triggerSync();
+      const res = await apiRequest('/api/sync/cloud', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: cleanEmail,
+          spreadsheetId: syncSpreadsheetIdInput.trim() || undefined,
+          driveFolderId: syncFolderIdInput.trim() || undefined,
+          linkOnly,
+        }),
+      });
+
+      if (res.success) {
+        setCloudSyncResult(res);
+        await loadAdminData();
+        await notifyFaceDatabaseChanged();
+      } else {
+        setCloudSyncError(res.error || 'Gagal menyinkronkan database.');
+      }
     } catch (e: any) {
-      alert(e.message || 'Gagal inisialisasi Google Sheets.');
+      setCloudSyncError(e.message || 'Terjadi kesalahan saat sinkronisasi ke Drive & Sheets.');
+    } finally {
+      setIsCloudSyncing(false);
     }
   };
 
-  // Drive Backup
-  const handleCreateBackup = async () => {
-    try {
-      const res = await apiRequest('/api/backup', { method: 'POST' });
-      alert(res.message || `Backup berhasil dibuat: ${res.fileName}`);
-    } catch (e: any) {
-      alert(e.message || 'Gagal membuat backup.');
+  // Download Multi-Sheet Workbook (.xlsx) linked to email
+  const handleDownloadSyncedWorkbook = () => {
+    if (!cloudSyncResult?.exportBundle?.sheetsRows) return;
+    const wb = XLSX.utils.book_new();
+    const sheetsRows = cloudSyncResult.exportBundle.sheetsRows as Record<string, string[][]>;
+    for (const [sheetName, rows] of Object.entries(sheetsRows)) {
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31));
     }
+    const safeEmail = (cloudSyncResult.linkedEmail || syncEmailInput).replace(/[^a-zA-Z0-9._-]/g, '_');
+    XLSX.writeFile(wb, `Database_Sheets_${safeEmail}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  // Download Complete Drive Backup JSON linked to email
+  const handleDownloadSyncedJson = () => {
+    if (!cloudSyncResult?.exportBundle) return;
+    const content = JSON.stringify(cloudSyncResult.exportBundle, null, 2);
+    const blob = new Blob([content], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeEmail = (cloudSyncResult.linkedEmail || syncEmailInput).replace(/[^a-zA-Z0-9._-]/g, '_');
+    a.href = url;
+    a.download = `Backup_Drive_${safeEmail}_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   // Download Student & Teacher Template (.xlsx)
@@ -221,22 +301,23 @@ export const AdminDashboard: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <button
-            onClick={handleInitSheets}
-            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800 transition"
-            title="Inisialisasi tabel dan header Google Sheets"
-          >
-            <Database className="w-4 h-4" />
-            <span>Init Google Sheets</span>
-          </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          {settings?.syncTargetEmail && (
+            <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px] font-semibold">
+              <Mail className="w-3.5 h-3.5" />
+              <span>Tertaut: {settings.syncTargetEmail}</span>
+            </div>
+          )}
 
           <button
-            onClick={handleCreateBackup}
-            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 transition"
+            onClick={openCloudSyncModal}
+            className="flex items-center gap-2 px-4 py-2.5 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/20 transition"
+            title="Masukkan email untuk menautkan & menyinkronkan seluruh database ke Drive dan Google Sheets"
           >
-            <Download className="w-4 h-4" />
-            <span>Backup ke Drive</span>
+            <Cloud className="w-4 h-4" />
+            <span>
+              {settings?.syncTargetEmail ? 'Sinkron Drive & Sheet' : 'Tautkan Email • Sinkron Drive & Sheet'}
+            </span>
           </button>
         </div>
       </div>
@@ -582,6 +663,234 @@ export const AdminDashboard: React.FC = () => {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Email-Linked Drive & Sheets Full Sync Modal */}
+      {showCloudSyncModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="w-full max-w-2xl rounded-3xl bg-white dark:bg-slate-900 p-6 sm:p-8 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-5 my-8">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-md shadow-blue-500/20">
+                  <Cloud className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-900 dark:text-white">
+                    Sinkronisasi Database ke Drive & Sheets
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Wajib memasukkan email terlebih dahulu agar seluruh file Drive & Google Sheets ditautkan sesuai email.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCloudSyncModal(false)}
+                className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {cloudSyncError && (
+              <div className="p-3.5 rounded-2xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-xs text-red-700 dark:text-red-300 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{cloudSyncError}</span>
+              </div>
+            )}
+
+            {/* Step 1: Mandatory Email Input */}
+            <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                  <Mail className="w-4 h-4 text-blue-600" />
+                  1. Alamat Email Penautan (Wajib Sebelum Sinkronisasi)
+                </span>
+                {isSyncEmailValid && (
+                  <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Email Valid
+                  </span>
+                )}
+              </div>
+
+              <input
+                type="email"
+                value={syncEmailInput}
+                onChange={e => {
+                  setSyncEmailInput(e.target.value);
+                  setCloudSyncError(null);
+                }}
+                placeholder="Masukkan email Google tujuan (contoh: presensiapp138@gmail.com)"
+                className="w-full px-4 py-2.5 text-sm bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                required
+              />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                    ID Google Spreadsheet (Opsional - otomatis dibuat jika kosong)
+                  </label>
+                  <input
+                    type="text"
+                    value={syncSpreadsheetIdInput}
+                    onChange={e => setSyncSpreadsheetIdInput(e.target.value)}
+                    placeholder="Contoh: 1BxiMVs0XRA5..."
+                    className="w-full px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                    ID Folder Google Drive (Opsional - otomatis dibuat jika kosong)
+                  </label>
+                  <input
+                    type="text"
+                    value={syncFolderIdInput}
+                    onChange={e => setSyncFolderIdInput(e.target.value)}
+                    placeholder="Contoh: 1fO1_bZabc..."
+                    className="w-full px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Live Database Tables Preview */}
+            <div className="space-y-2">
+              <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                2. Cakupan Seluruh Database Aplikasi (13 Tabel)
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                {[
+                  { label: 'Siswa', count: students.length },
+                  { label: 'Guru', count: teachers.length },
+                  { label: 'Kelas', count: classes.length },
+                  { label: 'Wajah Biometric', count: faceTemplates.length },
+                  { label: 'Akun Pengguna', count: usersList.length },
+                  { label: 'Lokasi GPS', count: locations.length },
+                  { label: 'Audit Log', count: auditLogs.length },
+                  { label: 'Presensi, Izin & Settings', count: 'Semua' },
+                ].map(item => (
+                  <div
+                    key={item.label}
+                    className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800 flex items-center justify-between"
+                  >
+                    <span className="text-slate-600 dark:text-slate-400 truncate pr-1">{item.label}</span>
+                    <span className="font-bold text-slate-900 dark:text-white">{item.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-wrap items-center gap-3 pt-2">
+              <button
+                type="button"
+                disabled={!isSyncEmailValid || isCloudSyncing}
+                onClick={() => void handleRunCloudSync(true)}
+                className="px-4 py-2.5 text-xs font-bold rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 disabled:opacity-50 transition"
+              >
+                Tautkan Email Saja
+              </button>
+              <button
+                type="button"
+                disabled={!isSyncEmailValid || isCloudSyncing}
+                onClick={() => void handleRunCloudSync(false)}
+                className="flex-1 px-5 py-2.5 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/25 disabled:opacity-50 flex items-center justify-center gap-2 transition"
+              >
+                {isCloudSyncing ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Menyinkronkan 13 Tabel ke Drive & Sheets...</span>
+                  </>
+                ) : (
+                  <>
+                    <Cloud className="w-4 h-4" />
+                    <span>Tautkan Email & Sinkronkan Semua Database</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {!isSyncEmailValid && (
+              <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+                Tombol sinkronisasi terkunci sampai Anda memasukkan alamat email yang valid.
+              </p>
+            )}
+
+            {/* Result Panel */}
+            {cloudSyncResult && (
+              <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 space-y-3">
+                <div className="flex items-start gap-2 text-xs text-emerald-800 dark:text-emerald-200 font-semibold">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <div>{cloudSyncResult.message}</div>
+                    <div className="text-[11px] opacity-80 mt-0.5">
+                      Email tertaut: <strong>{cloudSyncResult.linkedEmail}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                {cloudSyncResult.tableCounts && (
+                  <div className="flex flex-wrap gap-1.5 text-[10px]">
+                    {Object.entries(cloudSyncResult.tableCounts as Record<string, number>).map(([tbl, cnt]) => (
+                      <span
+                        key={tbl}
+                        className="px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-800 text-slate-700 dark:text-slate-300 font-mono"
+                      >
+                        {tbl}: {cnt}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {cloudSyncResult.sheetsResult?.spreadsheetUrl && (
+                    <a
+                      href={cloudSyncResult.sheetsResult.spreadsheetUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-3.5 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 transition"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Buka Google Sheets</span>
+                    </a>
+                  )}
+                  {cloudSyncResult.driveResult?.folderUrl && (
+                    <a
+                      href={cloudSyncResult.driveResult.folderUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-3.5 py-2 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1.5 transition"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Buka Folder Drive</span>
+                    </a>
+                  )}
+                  {cloudSyncResult.exportBundle && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleDownloadSyncedWorkbook}
+                        className="px-3.5 py-2 text-xs font-bold rounded-xl bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-950 flex items-center gap-1.5 transition"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5" />
+                        <span>Unduh Semua Sheet (.xlsx)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDownloadSyncedJson}
+                        className="px-3.5 py-2 text-xs font-bold rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1.5 transition"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Unduh Backup Drive (.json)</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

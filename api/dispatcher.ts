@@ -8,6 +8,10 @@ import {
   updateSchoolSetting,
   recordAudit,
   isGoogleSheetsConfigured,
+  isServiceAccountConfigured,
+  isValidSyncEmail,
+  getAllDatabaseTablesExport,
+  syncAllTablesToGoogleSheets,
 } from './lib/db.ts';
 import {
   generateToken,
@@ -102,25 +106,127 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
     if (pathname === '/api/status' && method === 'GET') {
       const sheetsOk = isGoogleSheetsConfigured();
       const driveOk = isGoogleDriveConfigured();
+      const serviceAccountOk = isServiceAccountConfigured();
+      const currentSettings = await getSchoolSettings();
       return jsonResponse({
         success: true,
         sheetsConfigured: sheetsOk,
         driveConfigured: driveOk,
-        mode: sheetsOk ? 'Google Sheets' : 'Simulated / Memory Mode (Ready to use)',
+        serviceAccountConfigured: serviceAccountOk,
+        syncTargetEmail: currentSettings.syncTargetEmail || '',
+        syncLinkedSpreadsheetId: currentSettings.syncLinkedSpreadsheetId || '',
+        syncLinkedFolderId: currentSettings.syncLinkedFolderId || '',
+        lastCloudSyncAt: currentSettings.lastCloudSyncAt || '',
+        mode: serviceAccountOk ? 'Google Drive & Sheets Cloud' : 'Simulated / Memory Mode (Siap Ekspor & Sinkron)',
         timestamp: new Date().toISOString(),
       });
     }
 
     if (pathname === '/api/sheets/init' && method === 'POST') {
-      const result = await initializeDatabase();
+      const body = (req.body as { email?: string; spreadsheetId?: string }) || {};
+      const currentSettings = await getSchoolSettings();
+      const targetEmail = (body.email || currentSettings.syncTargetEmail || '').trim();
+      if (!isValidSyncEmail(targetEmail)) {
+        return errorResponse('Harap masukkan alamat email yang valid terlebih dahulu sebelum menyinkronkan ke Google Sheets.', 400);
+      }
+
+      await initializeDatabase();
+      const syncResult = await syncAllTablesToGoogleSheets(
+        targetEmail,
+        currentUser?.username || currentUser?.userId || 'admin',
+        body.spreadsheetId
+      );
       await recordAudit(
         currentUser?.userId || 'system',
-        'INIT_DATABASE',
+        'SYNC_GOOGLE_SHEETS',
         'System',
-        'all',
-        'Inisialisasi tabel Google Sheets dan data awal.'
+        targetEmail,
+        `Inisialisasi & sinkronisasi ${syncResult.sheetsSynced.length} tabel Google Sheets ditautkan ke ${targetEmail}.`
       );
-      return jsonResponse(result);
+      return jsonResponse(syncResult);
+    }
+
+    if (pathname === '/api/sync/cloud' && method === 'POST') {
+      if (!currentUser || currentUser.role !== 'admin') {
+        return errorResponse('Hanya administrator yang dapat menautkan email & menyinkronkan database ke Drive dan Sheets.', 403);
+      }
+
+      const body = (req.body as {
+        email?: string;
+        spreadsheetId?: string;
+        driveFolderId?: string;
+        linkOnly?: boolean;
+      }) || {};
+
+      const currentSettings = await getSchoolSettings();
+      const targetEmail = (body.email || currentSettings.syncTargetEmail || '').trim();
+      if (!isValidSyncEmail(targetEmail)) {
+        return errorResponse('Masukkan alamat email yang valid terlebih dahulu agar aplikasi dapat ditautkan sebelum sinkronisasi.', 400);
+      }
+
+      const actor = currentUser.username || currentUser.userId || 'admin';
+      await updateSchoolSetting('syncTargetEmail', targetEmail, actor);
+      if (body.spreadsheetId !== undefined) {
+        await updateSchoolSetting('syncLinkedSpreadsheetId', body.spreadsheetId.trim(), actor);
+      }
+      if (body.driveFolderId !== undefined) {
+        await updateSchoolSetting('syncLinkedFolderId', body.driveFolderId.trim(), actor);
+      }
+
+      const exportBundle = await getAllDatabaseTablesExport(targetEmail, actor);
+
+      if (body.linkOnly) {
+        await recordAudit(
+          currentUser.userId,
+          'LINK_SYNC_EMAIL',
+          'Settings',
+          targetEmail,
+          `Email sinkronisasi Drive & Sheets ditautkan ke ${targetEmail}.`
+        );
+        return jsonResponse({
+          success: true,
+          linkedOnly: true,
+          linkedEmail: targetEmail,
+          tableCounts: exportBundle.tableCounts,
+          message: `Email "${targetEmail}" berhasil ditautkan. Siap untuk menyinkronkan seluruh database ke Drive dan Sheets.`,
+        });
+      }
+
+      const [sheetsResult, driveResult] = await Promise.all([
+        syncAllTablesToGoogleSheets(targetEmail, actor, body.spreadsheetId),
+        createDatabaseBackup(actor, targetEmail, body.driveFolderId),
+      ]);
+
+      await recordAudit(
+        currentUser.userId,
+        'SYNC_ALL_DRIVE_SHEETS',
+        'System',
+        targetEmail,
+        `Seluruh ${sheetsResult.sheetsSynced.length} tabel database disinkronkan ke Drive & Sheets dan ditautkan ke ${targetEmail}.`
+      );
+
+      return jsonResponse({
+        success: true,
+        linkedEmail: targetEmail,
+        cloudSynced: sheetsResult.cloudSynced || driveResult.cloudSynced,
+        sheetsResult,
+        driveResult: {
+          success: driveResult.success,
+          cloudSynced: driveResult.cloudSynced,
+          fileId: driveResult.fileId,
+          fileName: driveResult.fileName,
+          fileUrl: driveResult.fileUrl,
+          folderId: driveResult.folderId,
+          folderUrl: driveResult.folderUrl,
+          sizeBytes: driveResult.sizeBytes,
+        },
+        tableCounts: exportBundle.tableCounts,
+        exportBundle,
+        message:
+          sheetsResult.cloudSynced || driveResult.cloudSynced
+            ? `Seluruh 13 tabel database berhasil disinkronkan ke Google Drive & Google Sheets untuk email ${targetEmail}!`
+            : `Email ${targetEmail} tertaut & seluruh 13 tabel database siap! Karena kredensial Service Account server belum diisi di .env, silakan unduh paket Sheets (.xlsx) & Drive (.json) atau lengkapi variabel .env untuk sinkronisasi otomatis ke cloud.`,
+      });
     }
 
     // --------------------------------------------------------------------------
@@ -1535,13 +1641,20 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
         return errorResponse('Hanya admin yang dapat membuat backup.', 403);
       }
 
-      const backupRes = await createDatabaseBackup(currentUser.username);
-      await recordAudit(currentUser.userId, 'CREATE_BACKUP', 'System', 'backup', `Database backup dibuat: ${backupRes.fileName}`);
+      const body = (req.body as { email?: string; driveFolderId?: string }) || {};
+      const currentSettings = await getSchoolSettings();
+      const targetEmail = (body.email || currentSettings.syncTargetEmail || '').trim();
+      if (!isValidSyncEmail(targetEmail)) {
+        return errorResponse('Harap masukkan dan tautkan alamat email yang valid terlebih dahulu sebelum backup ke Google Drive.', 400);
+      }
+
+      const backupRes = await createDatabaseBackup(currentUser.username, targetEmail, body.driveFolderId);
+      await recordAudit(currentUser.userId, 'CREATE_BACKUP', 'System', targetEmail, `Database backup dibuat (${backupRes.fileName}) & ditautkan ke ${targetEmail}`);
       return jsonResponse({
         ...backupRes,
         message: backupRes.fileId
-          ? 'Backup berhasil disimpan ke Google Drive!'
-          : 'Backup JSON berhasil digenerate!',
+          ? `Backup berhasil disimpan ke Google Drive & ditautkan ke ${targetEmail}!`
+          : `Backup JSON berhasil dibuat untuk email ${targetEmail}!`,
       });
     }
 

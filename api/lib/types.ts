@@ -192,6 +192,10 @@ export interface SchoolSettings {
   foundationWatermarkUrl?: string;
   foundationQrCodeUrl?: string;
   levelConfigsJson?: string;
+  syncTargetEmail?: string;
+  syncLinkedSpreadsheetId?: string;
+  syncLinkedFolderId?: string;
+  lastCloudSyncAt?: string;
 }
 
 export interface FollowUpNote {
