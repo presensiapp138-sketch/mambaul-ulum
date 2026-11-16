@@ -1,18 +1,48 @@
 import { queueOfflineItem, getOfflineQueue, removeOfflineItem } from './indexedDb.ts';
 
 const TOKEN_KEY = 'presensi_auth_token';
+const LOGOUT_FLAG_KEY = 'presensi_tab_logged_out';
+const CLIENT_ID_KEY = 'presensi_ws_client_id';
+
+export function getRealtimeClientId(): string {
+  if (typeof window === 'undefined') return 'ssr-client';
+  let id = sessionStorage.getItem(CLIENT_ID_KEY);
+  if (!id) {
+    id = `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem(CLIENT_ID_KEY, id);
+  }
+  return id;
+}
 
 export function getStoredToken(): string | null {
   if (typeof window === 'undefined') return null;
-  return localStorage.getItem(TOKEN_KEY);
+  const sessionToken = sessionStorage.getItem(TOKEN_KEY);
+  if (sessionToken) return sessionToken;
+  if (sessionStorage.getItem(LOGOUT_FLAG_KEY) === '1') return null;
+  const legacyLocal = localStorage.getItem(TOKEN_KEY);
+  if (legacyLocal) {
+    // Pin to this tab's sessionStorage so another tab logging in does not hijack this tab
+    sessionStorage.setItem(TOKEN_KEY, legacyLocal);
+  }
+  return legacyLocal;
 }
 
 export function setStoredToken(token: string | null): void {
   if (typeof window === 'undefined') return;
   if (token) {
-    localStorage.setItem(TOKEN_KEY, token);
+    sessionStorage.removeItem(LOGOUT_FLAG_KEY);
+    sessionStorage.setItem(TOKEN_KEY, token);
+    // Only seed localStorage if empty so existing tabs remain undisturbed
+    if (!localStorage.getItem(TOKEN_KEY)) {
+      localStorage.setItem(TOKEN_KEY, token);
+    }
   } else {
-    localStorage.removeItem(TOKEN_KEY);
+    const current = sessionStorage.getItem(TOKEN_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
+    sessionStorage.setItem(LOGOUT_FLAG_KEY, '1');
+    if (current && localStorage.getItem(TOKEN_KEY) === current) {
+      localStorage.removeItem(TOKEN_KEY);
+    }
   }
 }
 

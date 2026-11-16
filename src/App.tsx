@@ -14,11 +14,15 @@ import { preloadFaceModelsInBackground } from './lib/faceDetection.ts';
 
 function MainApp() {
   const { user, isAuthenticated } = useAuth();
-  const { syncStatus, offlineQueueCount } = useSync();
+  const { syncStatus, offlineQueueCount, reportActiveView } = useSync();
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('portal');
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [loginInitialMode, setLoginInitialMode] = useState<'select' | 'teacher' | 'admin'>('select');
+
+  useEffect(() => {
+    reportActiveView(activeTab);
+  }, [activeTab, reportActiveView]);
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       return (

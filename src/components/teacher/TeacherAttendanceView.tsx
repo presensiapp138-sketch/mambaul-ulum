@@ -37,7 +37,7 @@ export interface TeacherAttendanceViewProps {
 
 export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ onReturnToPortal }) => {
   const { user } = useAuth();
-  const { settings, faceTemplates: syncedFaceTemplates, faceTemplatesSyncedAt, triggerSync } = useSync();
+  const { settings, faceTemplates: syncedFaceTemplates, faceTemplatesSyncedAt, triggerSync, tableVersions } = useSync();
 
   // Location state
   const [gpsLoading, setGpsLoading] = useState<boolean>(true);
@@ -98,6 +98,25 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Real-time refresh when TeacherAttendance or Locations mutate from any user/admin
+  const tchAttVer = tableVersions['TeacherAttendance'] || 0;
+  const locVer = tableVersions['Locations'] || 0;
+  useEffect(() => {
+    if (tchAttVer === 0 && locVer === 0) return;
+    (async () => {
+      try {
+        const [locRes, histRes] = await Promise.all([
+          apiRequest<SchoolLocation[]>('/api/locations'),
+          apiRequest<TeacherAttendance[]>('/api/attendance/teacher/history'),
+        ]);
+        if (locRes.success && locRes.data) setLocations(locRes.data);
+        if (histRes.success && histRes.data) setHistory(histRes.data);
+      } catch {
+        // Ignore background refresh error
+      }
+    })();
+  }, [tchAttVer, locVer]);
 
   // Request GPS Geolocation
   const requestLocation = useCallback(() => {

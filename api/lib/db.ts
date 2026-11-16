@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { google } from 'googleapis';
 import type { sheets_v4 } from 'googleapis';
 import type {
@@ -17,6 +19,7 @@ import type {
   SchoolSettings
 } from './types.ts';
 import { hashPassword } from './auth.ts';
+import { broadcastTableChange } from './realtime.ts';
 
 // Cache for short TTL to prevent hitting Google API quotas
 interface CacheEntry<T> {
@@ -440,13 +443,52 @@ function getInitialSeedData(): DatabaseSchema {
   };
 }
 
-// In-memory store fallback when Google credentials are not yet set (lazy initialized)
-let _memoryStore: DatabaseSchema | null = null;
-function getMemoryStore(): DatabaseSchema {
-  if (!_memoryStore) {
-    _memoryStore = getInitialSeedData();
+// Global shared store + persistent local disk snapshot (.data/database.json)
+const LOCAL_DB_DIR = path.resolve(process.cwd(), '.data');
+const LOCAL_DB_FILE = path.join(LOCAL_DB_DIR, 'database.json');
+const GLOBAL_STORE_KEY = '__presensiMemoryStore__';
+
+function loadMemoryStoreFromDisk(): DatabaseSchema | null {
+  try {
+    if (fs.existsSync(LOCAL_DB_FILE)) {
+      const raw = fs.readFileSync(LOCAL_DB_FILE, 'utf-8');
+      const parsed = JSON.parse(raw) as Partial<DatabaseSchema>;
+      const seed = getInitialSeedData();
+      return {
+        ...seed,
+        ...parsed,
+        Settings: { ...seed.Settings, ...(parsed.Settings || {}) },
+      };
+    }
+  } catch (err) {
+    console.warn('Could not load local database snapshot, using seed:', err);
   }
-  return _memoryStore;
+  return null;
+}
+
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePersistLocalStore(store: DatabaseSchema): void {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    try {
+      if (!fs.existsSync(LOCAL_DB_DIR)) {
+        fs.mkdirSync(LOCAL_DB_DIR, { recursive: true });
+      }
+      const tempFile = `${LOCAL_DB_FILE}.tmp`;
+      fs.writeFileSync(tempFile, JSON.stringify(store), 'utf-8');
+      fs.renameSync(tempFile, LOCAL_DB_FILE);
+    } catch {
+      // Ignore write errors in read-only serverless environments
+    }
+  }, 80);
+}
+
+function getMemoryStore(): DatabaseSchema {
+  const g = globalThis as Record<string, unknown>;
+  if (!g[GLOBAL_STORE_KEY]) {
+    g[GLOBAL_STORE_KEY] = loadMemoryStoreFromDisk() || getInitialSeedData();
+  }
+  return g[GLOBAL_STORE_KEY] as DatabaseSchema;
 }
 
 export function isValidSyncEmail(email?: string): boolean {
@@ -726,10 +768,11 @@ export async function appendRecord<T extends { id: string; updatedAt?: string }>
   delete cacheStore[`table_${tableName}`];
 
   if (!isGoogleSheetsConfigured()) {
-    const list = getMemoryStore()[tableName] as unknown as T[];
+    const store = getMemoryStore();
+    const list = store[tableName] as unknown as T[];
     list.push(fullRecord);
     // Record changelog in memory
-    getMemoryStore().ChangeLog.push({
+    store.ChangeLog.push({
       id: `chg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       tableName,
       recordId: fullRecord.id,
@@ -738,6 +781,8 @@ export async function appendRecord<T extends { id: string; updatedAt?: string }>
       updatedBy,
     });
     delete cacheStore['table_ChangeLog'];
+    schedulePersistLocalStore(store);
+    broadcastTableChange({ tableName, action: 'CREATE', recordId: fullRecord.id, updatedBy });
     return fullRecord;
   }
 
@@ -759,8 +804,9 @@ export async function appendRecord<T extends { id: string; updatedAt?: string }>
     requestBody: { values: [rowValues] },
   });
 
-  // Record change in ChangeLog
+  // Record change in ChangeLog & notify real-time subscribers
   await recordChangeLog(tableName, fullRecord.id, 'CREATE', updatedBy);
+  broadcastTableChange({ tableName, action: 'CREATE', recordId: fullRecord.id, updatedBy });
 
   return fullRecord;
 }
@@ -777,7 +823,8 @@ export async function updateRecord<T extends { id: string; updatedAt?: string }>
   delete cacheStore[`table_${tableName}`];
 
   if (!isGoogleSheetsConfigured()) {
-    const list = getMemoryStore()[tableName] as unknown as T[];
+    const store = getMemoryStore();
+    const list = store[tableName] as unknown as T[];
     const idx = list.findIndex(r => r.id === id);
     if (idx === -1) throw new Error(`Record with id ${id} not found in ${tableName}`);
 
@@ -795,7 +842,7 @@ export async function updateRecord<T extends { id: string; updatedAt?: string }>
     };
     list[idx] = updated;
 
-    getMemoryStore().ChangeLog.push({
+    store.ChangeLog.push({
       id: `chg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       tableName,
       recordId: id,
@@ -804,6 +851,8 @@ export async function updateRecord<T extends { id: string; updatedAt?: string }>
       updatedBy,
     });
     delete cacheStore['table_ChangeLog'];
+    schedulePersistLocalStore(store);
+    broadcastTableChange({ tableName, action: 'UPDATE', recordId: id, updatedBy });
 
     return updated;
   }
@@ -875,6 +924,7 @@ export async function updateRecord<T extends { id: string; updatedAt?: string }>
   });
 
   await recordChangeLog(tableName, id, 'UPDATE', updatedBy);
+  broadcastTableChange({ tableName, action: 'UPDATE', recordId: id, updatedBy });
   return (merged as unknown) as T;
 }
 
@@ -888,11 +938,12 @@ export async function deleteRecord(
   delete cacheStore[`table_${tableName}`];
 
   if (!isGoogleSheetsConfigured()) {
-    const list = getMemoryStore()[tableName] as unknown as { id: string }[];
+    const store = getMemoryStore();
+    const list = store[tableName] as unknown as { id: string }[];
     const idx = list.findIndex(r => r.id === id);
     if (idx !== -1) {
       list.splice(idx, 1);
-      getMemoryStore().ChangeLog.push({
+      store.ChangeLog.push({
         id: `chg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         tableName,
         recordId: id,
@@ -901,6 +952,8 @@ export async function deleteRecord(
         updatedBy,
       });
       delete cacheStore['table_ChangeLog'];
+      schedulePersistLocalStore(store);
+      broadcastTableChange({ tableName, action: 'DELETE', recordId: id, updatedBy });
       return true;
     }
     return false;
@@ -952,6 +1005,7 @@ export async function deleteRecord(
   });
 
   await recordChangeLog(tableName, id, 'DELETE', updatedBy);
+  broadcastTableChange({ tableName, action: 'DELETE', recordId: id, updatedBy });
   return true;
 }
 
@@ -1027,7 +1081,10 @@ export async function recordAudit(
 
   try {
     if (!isGoogleSheetsConfigured()) {
-      getMemoryStore().AuditLog.push(entry);
+      const store = getMemoryStore();
+      store.AuditLog.push(entry);
+      delete cacheStore['table_AuditLog'];
+      schedulePersistLocalStore(store);
       return;
     }
     const sheets = getGoogleSheetsClient();
@@ -1331,7 +1388,19 @@ export async function syncAllTablesToGoogleSheets(
 export async function updateSchoolSetting(key: string, value: string, updatedBy: string = 'admin'): Promise<void> {
   const now = new Date().toISOString();
   if (!isGoogleSheetsConfigured()) {
-    getMemoryStore().Settings[key] = value;
+    const store = getMemoryStore();
+    store.Settings[key] = value;
+    store.ChangeLog.push({
+      id: `chg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      tableName: 'Settings',
+      recordId: key,
+      action: 'UPDATE',
+      timestamp: now,
+      updatedBy,
+    });
+    delete cacheStore['table_ChangeLog'];
+    schedulePersistLocalStore(store);
+    broadcastTableChange({ tableName: 'Settings', action: 'UPDATE', recordId: key, updatedBy });
     return;
   }
 
@@ -1372,4 +1441,5 @@ export async function updateSchoolSetting(key: string, value: string, updatedBy:
   }
 
   delete cacheStore['table_Settings'];
+  broadcastTableChange({ tableName: 'Settings', action: 'UPDATE', recordId: key, updatedBy });
 }

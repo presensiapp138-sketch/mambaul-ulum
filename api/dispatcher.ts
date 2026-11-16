@@ -26,6 +26,11 @@ import {
   createDatabaseBackup,
   uploadAttendancePhoto,
 } from './lib/drive.ts';
+import {
+  getActiveUsersSnapshot,
+  getRecentEvents,
+  getServerVersion,
+} from './lib/realtime.ts';
 import type {
   User,
   Teacher,
@@ -314,8 +319,18 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
     }
 
     // --------------------------------------------------------------------------
-    // 3. Real-Time Sync & Polling Endpoint (smart diff via ChangeLog & live signatures)
+    // 3. Real-Time Sync, Presence & Polling Endpoint
     // --------------------------------------------------------------------------
+    if (pathname === '/api/presence' && method === 'GET') {
+      return jsonResponse({
+        success: true,
+        serverVersion: getServerVersion(),
+        activeUsers: getActiveUsersSnapshot(),
+        recentEvents: getRecentEvents(),
+        serverTime: new Date().toISOString(),
+      });
+    }
+
     if (pathname === '/api/sync' && method === 'GET') {
       const since = req.query.since ? String(req.query.since) : '';
       const clientFaceSig = req.query.faceSig ? String(req.query.faceSig) : '';
@@ -385,6 +400,9 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
       return jsonResponse({
         success: true,
         serverTime: new Date().toISOString(),
+        serverVersion: getServerVersion(),
+        activeUsers: getActiveUsersSnapshot(),
+        recentEvents: getRecentEvents(),
         todayAttendance,
         activePermits,
         settings,
@@ -1368,6 +1386,7 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
       };
 
       const saved = await appendRecord<User>('Users', newUser, currentUser?.userId || 'admin');
+      await recordAudit(currentUser?.userId || 'admin', 'CREATE_USER', 'Users', saved.id, `Menambahkan akun pengguna ${saved.username} (${saved.role}).`);
       const { passwordHash, ...safe } = saved;
       return jsonResponse({ success: true, user: safe });
     }
@@ -1386,12 +1405,23 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
 
     if (pathname.startsWith('/api/users/') && method === 'PUT') {
       const id = pathname.replace('/api/users/', '');
-      const body = req.body as Partial<User>;
+      const body = { ...((req.body as Partial<User>) || {}) };
       delete body.passwordHash; // Don't allow raw hash update here
 
       const updated = await updateRecord<User>('Users', id, body, undefined, currentUser?.userId || 'admin');
+      await recordAudit(currentUser?.userId || 'admin', 'UPDATE_USER', 'Users', id, `Memperbarui akun pengguna ${updated.username} (${updated.role}, aktif=${updated.isActive}).`);
       const { passwordHash, ...safe } = updated;
       return jsonResponse({ success: true, user: safe });
+    }
+
+    if (pathname.startsWith('/api/users/') && method === 'DELETE') {
+      const id = pathname.replace('/api/users/', '');
+      if (currentUser && currentUser.userId === id) {
+        return errorResponse('Tidak dapat menghapus akun yang sedang Anda gunakan saat ini.', 400);
+      }
+      await deleteRecord('Users', id, currentUser?.userId || 'admin');
+      await recordAudit(currentUser?.userId || 'admin', 'DELETE_USER', 'Users', id, 'Menghapus akun pengguna oleh admin.');
+      return jsonResponse({ success: true, message: 'Pengguna berhasil dihapus.' });
     }
 
     // --------------------------------------------------------------------------

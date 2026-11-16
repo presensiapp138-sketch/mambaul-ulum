@@ -7,13 +7,42 @@ import {
   Student,
   SchoolClass,
 } from '../types/index.ts';
-import { apiRequest, syncOfflineQueue } from '../lib/api.ts';
+import { apiRequest, syncOfflineQueue, getStoredToken, getRealtimeClientId } from '../lib/api.ts';
 import { getOfflineQueue } from '../lib/indexedDb.ts';
+import { useAuth } from './AuthContext.tsx';
 
 export type SyncStatus = 'synced' | 'syncing' | 'offline';
 
+export interface ActiveUserPresence {
+  clientId: string;
+  userId: string;
+  username: string;
+  name: string;
+  role: string;
+  activeTab: string;
+  deviceLabel: string;
+  connectedAt: string;
+  lastSeenAt: string;
+}
+
+export interface RealtimeEventItem {
+  id: string;
+  tableName: string;
+  action: 'CREATE' | 'UPDATE' | 'DELETE' | 'SYNC' | 'INIT';
+  recordId: string;
+  updatedBy: string;
+  summary: string;
+  timestamp: string;
+  version: number;
+}
+
 interface SyncContextType {
   syncStatus: SyncStatus;
+  realtimeConnected: boolean;
+  serverVersion: number;
+  tableVersions: Record<string, number>;
+  activeUsers: ActiveUserPresence[];
+  recentEvents: RealtimeEventItem[];
   lastSyncedAt: Date | null;
   faceTemplatesSyncedAt: Date | null;
   todayAttendance: StudentAttendance[];
@@ -26,6 +55,7 @@ interface SyncContextType {
   triggerSync: (forceRefresh?: boolean) => Promise<void>;
   notifyFaceDatabaseChanged: () => Promise<void>;
   updateSettings: (newSettings: Partial<SchoolSettings>) => Promise<boolean>;
+  reportActiveView: (activeTab: string) => void;
 }
 
 const defaultSettings: SchoolSettings = {
@@ -49,10 +79,29 @@ const defaultSettings: SchoolSettings = {
 const SYNC_CHANNEL_NAME = 'presensi_mambaul_ulum_sync';
 const SYNC_STORAGE_KEY = 'presensi_sync_signal';
 
+function detectDeviceLabel(): string {
+  if (typeof navigator === 'undefined') return 'Web Browser';
+  const ua = navigator.userAgent || '';
+  if (/Android/i.test(ua)) return 'Android';
+  if (/iPhone|iPad|iPod/i.test(ua)) return 'iOS';
+  if (/Windows/i.test(ua)) return 'Windows';
+  if (/Mac/i.test(ua)) return 'macOS';
+  if (/Linux/i.test(ua)) return 'Linux';
+  return 'Web Browser';
+}
+
 const SyncContext = createContext<SyncContextType | undefined>(undefined);
 
 export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user, isAuthenticated } = useAuth();
+
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
+  const [realtimeConnected, setRealtimeConnected] = useState<boolean>(false);
+  const [serverVersion, setServerVersion] = useState<number>(0);
+  const [tableVersions, setTableVersions] = useState<Record<string, number>>({});
+  const [activeUsers, setActiveUsers] = useState<ActiveUserPresence[]>([]);
+  const [recentEvents, setRecentEvents] = useState<RealtimeEventItem[]>([]);
+
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [faceTemplatesSyncedAt, setFaceTemplatesSyncedAt] = useState<Date | null>(null);
   const [todayAttendance, setTodayAttendance] = useState<StudentAttendance[]>([]);
@@ -67,10 +116,15 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const faceSigRef = useRef<string>('__init__');
   const studentSigRef = useRef<string>('__init__');
   const classSigRef = useRef<string>('__init__');
+  const lastServerVersionRef = useRef<number>(0);
   const isPollingRef = useRef<boolean>(false);
   const pendingForceSyncRef = useRef<boolean>(false);
   const isTabActiveRef = useRef<boolean>(true);
   const channelRef = useRef<BroadcastChannel | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const activeTabRef = useRef<string>('portal');
+  const reconnectAttemptRef = useRef<number>(0);
+  const reconnectTimerRef = useRef<number | null>(null);
 
   // Monitor network status
   const updateOnlineStatus = useCallback(async () => {
@@ -88,7 +142,7 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  // Main smart polling function with signature diff & queued force refresh
+  // Main smart sync/reconciliation function
   const triggerSync = useCallback(async (forceRefresh: boolean = false) => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       setSyncStatus('offline');
@@ -96,7 +150,6 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     if (isPollingRef.current) {
-      // Never drop an explicit mutation sync while a background poll is in flight
       if (forceRefresh) {
         pendingForceSyncRef.current = true;
       }
@@ -127,6 +180,9 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const res = await apiRequest<{
         serverTime: string;
+        serverVersion?: number;
+        activeUsers?: ActiveUserPresence[];
+        recentEvents?: RealtimeEventItem[];
         todayAttendance: StudentAttendance[];
         activePermits: ToiletPermit[];
         settings: SchoolSettings;
@@ -140,6 +196,16 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }>(`/api/sync?${params.toString()}`);
 
       if (res.success) {
+        if (typeof res.serverVersion === 'number') {
+          lastServerVersionRef.current = Math.max(lastServerVersionRef.current, res.serverVersion);
+          setServerVersion(lastServerVersionRef.current);
+        }
+        if (Array.isArray(res.activeUsers)) {
+          setActiveUsers(res.activeUsers);
+        }
+        if (Array.isArray(res.recentEvents)) {
+          setRecentEvents(res.recentEvents);
+        }
         if (res.todayAttendance) {
           setTodayAttendance(res.todayAttendance);
         }
@@ -174,7 +240,7 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSyncStatus('synced');
       }
     } catch (err) {
-      console.warn('Sync polling error:', err);
+      console.warn('Sync reconciliation error:', err);
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
         setSyncStatus('offline');
       } else {
@@ -189,7 +255,172 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  // Broadcast across all open tabs/windows on this device + force-sync local state immediately
+  // Push session presence metadata over WebSocket whenever user logs in/out or changes tab
+  const sendSessionUpdate = useCallback((type: 'session:join' | 'session:update' = 'session:update') => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(
+        JSON.stringify({
+          type,
+          clientId: getRealtimeClientId(),
+          token: getStoredToken(),
+          activeTab: activeTabRef.current,
+          deviceLabel: detectDeviceLabel(),
+        })
+      );
+    } catch {
+      // Ignore send errors if socket closing
+    }
+  }, []);
+
+  const reportActiveView = useCallback(
+    (activeTab: string) => {
+      activeTabRef.current = activeTab;
+      sendSessionUpdate('session:update');
+    },
+    [sendSessionUpdate]
+  );
+
+  // Automatically update server presence when auth user changes
+  useEffect(() => {
+    sendSessionUpdate('session:update');
+  }, [user, isAuthenticated, sendSessionUpdate]);
+
+  // Real-time WebSocket connection (/ws) with automatic exponential backoff reconnect
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let unmounted = false;
+    let pingInterval: number | null = null;
+
+    const connectWebSocket = () => {
+      if (unmounted) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+      try {
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          reconnectAttemptRef.current = 0;
+          setRealtimeConnected(true);
+          sendSessionUpdate('session:join');
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+
+            if (msg.type === 'sync:welcome') {
+              if (Array.isArray(msg.activeUsers)) {
+                setActiveUsers(msg.activeUsers);
+              }
+              if (Array.isArray(msg.recentEvents)) {
+                setRecentEvents(msg.recentEvents);
+              }
+              if (typeof msg.serverVersion === 'number') {
+                const prev = lastServerVersionRef.current;
+                lastServerVersionRef.current = Math.max(prev, msg.serverVersion);
+                setServerVersion(lastServerVersionRef.current);
+                if (msg.serverVersion > prev) {
+                  void triggerSync(true);
+                }
+              }
+              return;
+            }
+
+            if (msg.type === 'presence:update') {
+              if (Array.isArray(msg.activeUsers)) {
+                setActiveUsers(msg.activeUsers);
+              }
+              return;
+            }
+
+            if (msg.type === 'db:changed') {
+              if (typeof msg.tableName === 'string' && typeof msg.version === 'number') {
+                setTableVersions((prev) => ({
+                  ...prev,
+                  [msg.tableName]: msg.version,
+                }));
+
+                if (msg.tableName !== 'AuditLog' && msg.tableName !== 'ChangeLog') {
+                  setRecentEvents((prev) => {
+                    if (prev.some((e) => e.id === `evt-${msg.version}` || e.version === msg.version)) {
+                      return prev;
+                    }
+                    const nextItem: RealtimeEventItem = {
+                      id: `evt-${msg.version}`,
+                      tableName: msg.tableName,
+                      action: msg.action || 'UPDATE',
+                      recordId: msg.recordId || '',
+                      updatedBy: msg.updatedBy || 'system',
+                      summary: msg.summary || `${msg.tableName} diperbarui`,
+                      timestamp: msg.timestamp || new Date().toISOString(),
+                      version: msg.version,
+                    };
+                    return [nextItem, ...prev].slice(0, 30);
+                  });
+                }
+
+                if (msg.version > lastServerVersionRef.current) {
+                  lastServerVersionRef.current = msg.version;
+                  setServerVersion(msg.version);
+                  const forceTables = new Set(['FaceTemplates', 'Students', 'Classes', 'Settings']);
+                  void triggerSync(forceTables.has(msg.tableName));
+                }
+              }
+            }
+          } catch {
+            // Ignore malformed message
+          }
+        };
+
+        ws.onclose = () => {
+          wsRef.current = null;
+          setRealtimeConnected(false);
+          if (!unmounted) {
+            const delay = Math.min(10_000, 1000 * Math.pow(2, reconnectAttemptRef.current));
+            reconnectAttemptRef.current += 1;
+            reconnectTimerRef.current = window.setTimeout(connectWebSocket, delay);
+          }
+        };
+
+        ws.onerror = () => {
+          // Close triggers clean reconnect
+        };
+      } catch {
+        setRealtimeConnected(false);
+      }
+    };
+
+    connectWebSocket();
+
+    pingInterval = window.setInterval(() => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'ping', clientId: getRealtimeClientId() }));
+        } catch {
+          // Ignore ping failure
+        }
+      }
+    }, 25_000);
+
+    return () => {
+      unmounted = true;
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+      if (pingInterval) window.clearInterval(pingInterval);
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [sendSessionUpdate, triggerSync]);
+
+  // Broadcast across same-browser tabs + force-sync local state immediately
   const notifyFaceDatabaseChanged = useCallback(async () => {
     try {
       channelRef.current?.postMessage({ type: 'FACE_DB_UPDATED', at: Date.now() });
@@ -199,7 +430,7 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       localStorage.setItem(SYNC_STORAGE_KEY, String(Date.now()));
     } catch {
-      // Ignore storage quota / private mode errors
+      // Ignore storage quota errors
     }
     await triggerSync(true);
   }, [triggerSync]);
@@ -213,7 +444,6 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const visible = document.visibilityState === 'visible';
       isTabActiveRef.current = visible;
       if (visible) {
-        // Immediately sync when returning to the kiosk/app tab
         void triggerSync(false);
       }
     };
@@ -255,18 +485,19 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [updateOnlineStatus, triggerSync]);
 
-  // Interval polling: 3 seconds when tab active, immediate on mount
+  // Safety fallback interval polling: 15s when WebSocket is connected, 3s if fallback mode
   useEffect(() => {
     void triggerSync(true);
 
+    const pollMs = realtimeConnected ? 15_000 : 3_000;
     const interval = setInterval(() => {
       if (isTabActiveRef.current) {
         void triggerSync(false);
       }
-    }, 3000);
+    }, pollMs);
 
     return () => clearInterval(interval);
-  }, [triggerSync]);
+  }, [triggerSync, realtimeConnected]);
 
   const updateSettings = async (newSettings: Partial<SchoolSettings>): Promise<boolean> => {
     try {
@@ -289,6 +520,11 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <SyncContext.Provider
       value={{
         syncStatus,
+        realtimeConnected,
+        serverVersion,
+        tableVersions,
+        activeUsers,
+        recentEvents,
         lastSyncedAt,
         faceTemplatesSyncedAt,
         todayAttendance,
@@ -301,6 +537,7 @@ export const SyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
         triggerSync,
         notifyFaceDatabaseChanged,
         updateSettings,
+        reportActiveView,
       }}
     >
       {children}

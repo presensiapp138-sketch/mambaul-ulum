@@ -69,7 +69,14 @@ import { StudentCardManager } from './StudentCardManager.tsx';
 
 export const AdminDashboard: React.FC = () => {
   const { user } = useAuth();
-  const { settings, updateSettings, triggerSync, notifyFaceDatabaseChanged } = useSync();
+  const {
+    settings,
+    updateSettings,
+    triggerSync,
+    notifyFaceDatabaseChanged,
+    tableVersions,
+    activeUsers,
+  } = useSync();
 
   // Tabs
   const [activeTab, setActiveTab] = useState<
@@ -118,42 +125,63 @@ export const AdminDashboard: React.FC = () => {
   const [isGoogleSigningIn, setIsGoogleSigningIn] = useState<boolean>(false);
   const [showSyncConfirmDialog, setShowSyncConfirmDialog] = useState<boolean>(false);
 
+  const fetchAdminTables = useCallback(async () => {
+    const [clsRes, stdRes, tchRes, locRes, usrRes, audRes, faceRes] = await Promise.all([
+      apiRequest<SchoolClass[]>('/api/classes'),
+      apiRequest<Student[]>('/api/students'),
+      apiRequest<Teacher[]>('/api/teachers'),
+      apiRequest<SchoolLocation[]>('/api/locations'),
+      apiRequest<any[]>('/api/users'),
+      apiRequest<AuditLog[]>('/api/audit-log'),
+      apiRequest<FaceTemplate[]>('/api/face-templates'),
+    ]);
+
+    if (clsRes.success && clsRes.data) setClasses(clsRes.data);
+    if (stdRes.success && stdRes.data) setStudents(stdRes.data);
+    if (tchRes.success && tchRes.data) setTeachers(tchRes.data);
+    if (locRes.success && locRes.data) setLocations(locRes.data);
+    if (usrRes.success && usrRes.data) setUsersList(usrRes.data);
+    if (audRes.success && audRes.data) setAuditLogs(audRes.data);
+    if (faceRes.success && faceRes.data) setFaceTemplates(faceRes.data);
+  }, []);
+
   // Load all admin data
   const loadAdminData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [clsRes, stdRes, tchRes, locRes, usrRes, audRes, faceRes] = await Promise.all([
-        apiRequest<SchoolClass[]>('/api/classes'),
-        apiRequest<Student[]>('/api/students'),
-        apiRequest<Teacher[]>('/api/teachers'),
-        apiRequest<SchoolLocation[]>('/api/locations'),
-        apiRequest<any[]>('/api/users'),
-        apiRequest<AuditLog[]>('/api/audit-log'),
-        apiRequest<FaceTemplate[]>('/api/face-templates'),
-      ]);
-
-      if (clsRes.success && clsRes.data) setClasses(clsRes.data);
-      if (stdRes.success && stdRes.data) setStudents(stdRes.data);
-      if (tchRes.success && tchRes.data) setTeachers(tchRes.data);
-      if (locRes.success && locRes.data) setLocations(locRes.data);
-      if (usrRes.success && usrRes.data) setUsersList(usrRes.data);
-      if (audRes.success && audRes.data) setAuditLogs(audRes.data);
-      if (faceRes.success && faceRes.data) setFaceTemplates(faceRes.data);
+      await fetchAdminTables();
     } catch (e) {
       console.error('Error fetching admin data:', e);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [fetchAdminTables]);
 
   const handleDataMutated = useCallback(async () => {
-    await loadAdminData();
+    await fetchAdminTables();
     await notifyFaceDatabaseChanged();
-  }, [loadAdminData, notifyFaceDatabaseChanged]);
+  }, [fetchAdminTables, notifyFaceDatabaseChanged]);
 
   useEffect(() => {
     loadAdminData();
   }, [loadAdminData]);
+
+  // Silent real-time refresh whenever any admin-managed table updates across multi-user sessions
+  const adminSyncKey = [
+    tableVersions['Classes'] || 0,
+    tableVersions['Students'] || 0,
+    tableVersions['Teachers'] || 0,
+    tableVersions['Locations'] || 0,
+    tableVersions['Users'] || 0,
+    tableVersions['FaceTemplates'] || 0,
+    tableVersions['AuditLog'] || 0,
+    tableVersions['Settings'] || 0,
+  ].join(':');
+
+  useEffect(() => {
+    if (adminSyncKey === '0:0:0:0:0:0:0:0') return;
+    fetchAdminTables().catch(() => {});
+  }, [adminSyncKey, fetchAdminTables]);
 
   useEffect(() => {
     if (settings) {
@@ -722,6 +750,8 @@ export const AdminDashboard: React.FC = () => {
         <UserManagementSection
           users={usersList}
           classes={classes}
+          activeUsers={activeUsers}
+          currentUserId={user?.id}
           onRefresh={handleDataMutated}
         />
       )}
@@ -1661,8 +1691,10 @@ const FaceDatabaseSection: React.FC<{
 const UserManagementSection: React.FC<{
   users: any[];
   classes: SchoolClass[];
+  activeUsers: Array<{ userId: string; activeTab: string; deviceLabel: string }>;
+  currentUserId?: string;
   onRefresh: () => void;
-}> = ({ users, classes, onRefresh }) => {
+}> = ({ users, classes, activeUsers, currentUserId, onRefresh }) => {
   const [showModal, setShowModal] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -1670,9 +1702,15 @@ const UserManagementSection: React.FC<{
   const [role, setRole] = useState<'admin' | 'wali_kelas' | 'bk' | 'kesiswaan' | 'guru'>('guru');
   const [classId, setClassId] = useState('');
   const [email, setEmail] = useState('');
+  const [userFeedback, setUserFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [resetTarget, setResetTarget] = useState<{ id: string; name: string } | null>(null);
+  const [resetNewPassword, setResetNewPassword] = useState('');
+
+  const onlineUserIds = new Set(activeUsers.map(a => a.userId));
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    setUserFeedback(null);
     try {
       const res = await apiRequest('/api/users', {
         method: 'POST',
@@ -1683,21 +1721,84 @@ const UserManagementSection: React.FC<{
         setUsername('');
         setPassword('');
         setName('');
+        setEmail('');
+        setClassId('');
+        setUserFeedback({ type: 'success', text: `Akun "${name}" berhasil ditambahkan dan langsung disinkronkan.` });
         onRefresh();
       } else {
-        alert(res.error || 'Gagal membuat pengguna');
+        setUserFeedback({ type: 'error', text: res.error || 'Gagal membuat pengguna' });
       }
     } catch (e: any) {
-      alert(e.message);
+      setUserFeedback({ type: 'error', text: e.message || 'Gagal membuat pengguna' });
+    }
+  };
+
+  const handleToggleActive = async (targetUser: any) => {
+    setUserFeedback(null);
+    try {
+      const nextActive = !targetUser.isActive;
+      const res = await apiRequest(`/api/users/${targetUser.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ isActive: nextActive }),
+      });
+      if (res.success) {
+        setUserFeedback({
+          type: 'success',
+          text: `Status akun "${targetUser.name}" diubah menjadi ${nextActive ? 'Aktif' : 'Nonaktif'}.`,
+        });
+        onRefresh();
+      }
+    } catch (e: any) {
+      setUserFeedback({ type: 'error', text: e.message || 'Gagal memperbarui status pengguna.' });
+    }
+  };
+
+  const handleDeleteUser = async (targetUser: any) => {
+    setUserFeedback(null);
+    try {
+      const res = await apiRequest(`/api/users/${targetUser.id}`, { method: 'DELETE' });
+      if (res.success) {
+        setUserFeedback({ type: 'success', text: `Akun "${targetUser.name}" berhasil dihapus.` });
+        onRefresh();
+      } else {
+        setUserFeedback({ type: 'error', text: res.error || 'Gagal menghapus pengguna.' });
+      }
+    } catch (e: any) {
+      setUserFeedback({ type: 'error', text: e.message || 'Gagal menghapus pengguna.' });
+    }
+  };
+
+  const handleConfirmResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetTarget || resetNewPassword.length < 5) {
+      setUserFeedback({ type: 'error', text: 'Password baru minimal 5 karakter.' });
+      return;
+    }
+    try {
+      const res = await apiRequest(`/api/users/${resetTarget.id}/password`, {
+        method: 'PUT',
+        body: JSON.stringify({ newPassword: resetNewPassword }),
+      });
+      if (res.success) {
+        setUserFeedback({ type: 'success', text: `Kata sandi "${resetTarget.name}" berhasil direset.` });
+        setResetTarget(null);
+        setResetNewPassword('');
+      } else {
+        setUserFeedback({ type: 'error', text: res.error || 'Gagal mereset kata sandi.' });
+      }
+    } catch (e: any) {
+      setUserFeedback({ type: 'error', text: e.message || 'Gagal mereset kata sandi.' });
     }
   };
 
   return (
     <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-base font-bold text-slate-900 dark:text-white">Manajemen Akun Guru & Staf</h3>
-          <p className="text-xs text-slate-500">Atur hak akses login, reset kata sandi, dan status aktif</p>
+          <h3 className="text-base font-bold text-slate-900 dark:text-white">Manajemen Akun Multi-Pengguna</h3>
+          <p className="text-xs text-slate-500">
+            Kelola akun Admin, Wali Kelas, Guru BK, Kesiswaan & Guru beserta status online real-time
+          </p>
         </div>
         <button
           onClick={() => setShowModal(true)}
@@ -1708,6 +1809,23 @@ const UserManagementSection: React.FC<{
         </button>
       </div>
 
+      {userFeedback && (
+        <div
+          className={`p-3 rounded-2xl text-xs flex items-center gap-2 border ${
+            userFeedback.type === 'success'
+              ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+              : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
+          }`}
+        >
+          {userFeedback.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          )}
+          <span>{userFeedback.text}</span>
+        </div>
+      )}
+
       <div className="overflow-x-auto">
         <table className="w-full text-left text-xs">
           <thead>
@@ -1716,54 +1834,127 @@ const UserManagementSection: React.FC<{
               <th className="py-3 px-3">Username</th>
               <th className="py-3 px-3">Peran (Role)</th>
               <th className="py-3 px-3">Kelas Binaan</th>
-              <th className="py-3 px-3">Status</th>
+              <th className="py-3 px-3">Sesi & Status</th>
               <th className="py-3 px-3 text-right">Aksi</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-            {users.map(u => (
-              <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                <td className="py-3 px-3 font-bold text-slate-900 dark:text-white">{u.name}</td>
-                <td className="py-3 px-3 font-mono text-slate-500">{u.username}</td>
-                <td className="py-3 px-3">
-                  <span className="px-2 py-0.5 rounded-md font-semibold text-[10px] bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
-                    {u.role}
-                  </span>
-                </td>
-                <td className="py-3 px-3 text-slate-500">
-                  {classes.find(c => c.id === u.classId)?.name || '-'}
-                </td>
-                <td className="py-3 px-3">
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      u.isActive ? 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950' : 'text-slate-400 bg-slate-100'
-                    }`}
-                  >
-                    {u.isActive ? 'Aktif' : 'Nonaktif'}
-                  </span>
-                </td>
-                <td className="py-3 px-3 text-right">
-                  <button
-                    onClick={async () => {
-                      const newP = prompt('Masukkan password baru:');
-                      if (newP) {
-                        await apiRequest(`/api/users/${u.id}/password`, {
-                          method: 'PUT',
-                          body: JSON.stringify({ newPassword: newP }),
-                        });
-                        alert('Password berhasil direset!');
-                      }
-                    }}
-                    className="px-2.5 py-1 text-xs text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950 rounded-lg transition"
-                  >
-                    Reset Sandi
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {users.map(u => {
+              const isOnline = onlineUserIds.has(u.id);
+              const isSelf = u.id === currentUserId;
+              return (
+                <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                  <td className="py-3 px-3 font-bold text-slate-900 dark:text-white">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                          isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300 dark:bg-slate-700'
+                        }`}
+                        title={isOnline ? 'Sedang Online Real-Time' : 'Offline'}
+                      />
+                      <span>{u.name}</span>
+                      {isSelf && (
+                        <span className="text-[10px] font-semibold text-blue-600 dark:text-blue-400">(Anda)</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="py-3 px-3 font-mono text-slate-500">{u.username}</td>
+                  <td className="py-3 px-3">
+                    <span className="px-2 py-0.5 rounded-md font-semibold text-[10px] bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                      {u.role}
+                    </span>
+                  </td>
+                  <td className="py-3 px-3 text-slate-500">
+                    {classes.find(c => c.id === u.classId)?.name || '-'}
+                  </td>
+                  <td className="py-3 px-3">
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={isSelf}
+                        onClick={() => void handleToggleActive(u)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+                          u.isActive
+                            ? 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950 hover:bg-emerald-100'
+                            : 'text-slate-500 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200'
+                        } disabled:opacity-60`}
+                        title={isSelf ? 'Akun yang sedang digunakan' : 'Klik untuk ubah status aktif/nonaktif'}
+                      >
+                        {u.isActive ? 'Aktif' : 'Nonaktif'}
+                      </button>
+                      {isOnline && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100/70 dark:bg-emerald-900/40">
+                          Online
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="py-3 px-3 text-right space-x-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResetTarget({ id: u.id, name: u.name });
+                        setResetNewPassword('');
+                      }}
+                      className="px-2.5 py-1 text-xs text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950 rounded-lg transition"
+                    >
+                      Reset Sandi
+                    </button>
+                    {!isSelf && (
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteUser(u)}
+                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition align-middle"
+                        title="Hapus akun pengguna"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {resetTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+            <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+              Reset Kata Sandi: {resetTarget.name}
+            </h4>
+            <form onSubmit={handleConfirmResetPassword} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold mb-1">Kata Sandi Baru (Minimal 5 karakter)</label>
+                <input
+                  type="password"
+                  value={resetNewPassword}
+                  onChange={e => setResetNewPassword(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+                  minLength={5}
+                  required
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setResetTarget(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-blue-600 text-white font-bold"
+                >
+                  Simpan Sandi
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
@@ -1791,12 +1982,23 @@ const UserManagementSection: React.FC<{
                 />
               </div>
               <div>
+                <label className="block font-semibold mb-1">Email (Opsional)</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  placeholder="nama@sekolah.sch.id"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+                />
+              </div>
+              <div>
                 <label className="block font-semibold mb-1">Password</label>
                 <input
                   type="password"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+                  minLength={5}
                   required
                 />
               </div>

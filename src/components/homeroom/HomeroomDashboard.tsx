@@ -24,7 +24,7 @@ import { ConfirmModal } from '../common/ConfirmModal.tsx';
 
 export const HomeroomDashboard: React.FC = () => {
   const { user } = useAuth();
-  const { settings, triggerSync } = useSync();
+  const { settings, triggerSync, tableVersions } = useSync();
 
   const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<string>('');
@@ -82,6 +82,37 @@ export const HomeroomDashboard: React.FC = () => {
   useEffect(() => {
     loadClassData();
   }, [loadClassData]);
+
+  // Silent real-time refresh whenever attendance, toilet permits, students, or classes mutate on any device
+  const attVer = tableVersions['StudentAttendance'] || 0;
+  const tltVer = tableVersions['ToiletPermits'] || 0;
+  const stdVer = tableVersions['Students'] || 0;
+  const clsVer = tableVersions['Classes'] || 0;
+
+  useEffect(() => {
+    if (!selectedClassId || (attVer === 0 && tltVer === 0 && stdVer === 0 && clsVer === 0)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [clsRes, stdRes, attRes, tltRes] = await Promise.all([
+          apiRequest<SchoolClass[]>('/api/classes'),
+          apiRequest<Student[]>(`/api/students?classId=${selectedClassId}`),
+          apiRequest<StudentAttendance[]>(`/api/attendance/today?classId=${selectedClassId}`),
+          apiRequest<any>('/api/toilet/active'),
+        ]);
+        if (cancelled) return;
+        if (clsRes.success && clsRes.data) setClasses(clsRes.data);
+        if (stdRes.success && stdRes.data) setStudents(stdRes.data);
+        if (attRes.success && attRes.data) setAttendanceRecords(attRes.data);
+        if (tltRes.success && tltRes.activePermits) setToiletPermits(tltRes.activePermits);
+      } catch {
+        // Ignore transient background refresh error
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedClassId, attVer, tltVer, stdVer, clsVer]);
 
   // When class changes (for admin viewing different homerooms)
   const handleClassChange = async (classId: string) => {

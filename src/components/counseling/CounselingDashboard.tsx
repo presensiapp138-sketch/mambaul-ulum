@@ -23,7 +23,7 @@ import { CardSkeleton, TableSkeleton } from '../common/Skeleton.tsx';
 
 export const CounselingDashboard: React.FC = () => {
   const { user } = useAuth();
-  const { settings } = useSync();
+  const { settings, tableVersions } = useSync();
 
   const [problemStudents, setProblemStudents] = useState<ProblemStudent[]>([]);
   const [classComparison, setClassComparison] = useState<Array<{
@@ -53,30 +53,46 @@ export const CounselingDashboard: React.FC = () => {
   const [actionPlan, setActionPlan] = useState<string>('');
   const [isSubmittingNote, setIsSubmittingNote] = useState<boolean>(false);
 
+  const fetchAllCounselingData = useCallback(async () => {
+    const [radarRes, recapRes, notesRes, clsRes, stdRes] = await Promise.all([
+      apiRequest<ProblemStudent[]>('/api/reports/radar'),
+      apiRequest<any>('/api/reports/recap'),
+      apiRequest<FollowUpNote[]>('/api/counseling/notes'),
+      apiRequest<SchoolClass[]>('/api/classes'),
+      apiRequest<Student[]>('/api/students'),
+    ]);
+
+    if (radarRes.success && radarRes.data) setProblemStudents(radarRes.data);
+    if (recapRes.success && recapRes.classSummaries) setClassComparison(recapRes.classSummaries);
+    if (notesRes.success && notesRes.data) setFollowUpNotes(notesRes.data);
+    if (clsRes.success && clsRes.data) setClasses(clsRes.data);
+    if (stdRes.success && stdRes.data) setStudents(stdRes.data);
+  }, []);
+
   const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [radarRes, recapRes, notesRes, clsRes, stdRes] = await Promise.all([
-        apiRequest<ProblemStudent[]>('/api/reports/radar'),
-        apiRequest<any>('/api/reports/recap'),
-        apiRequest<FollowUpNote[]>('/api/counseling/notes'),
-        apiRequest<SchoolClass[]>('/api/classes'),
-        apiRequest<Student[]>('/api/students'),
-      ]);
-
-      if (radarRes.success && radarRes.data) setProblemStudents(radarRes.data);
-      if (recapRes.success && recapRes.classSummaries) setClassComparison(recapRes.classSummaries);
-      if (notesRes.success && notesRes.data) setFollowUpNotes(notesRes.data);
-      if (clsRes.success && clsRes.data) setClasses(clsRes.data);
-      if (stdRes.success && stdRes.data) setStudents(stdRes.data);
+      await fetchAllCounselingData();
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [fetchAllCounselingData]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Real-time background refresh across multi-user sessions
+  const notesVer = tableVersions['FollowUpNotes'] || 0;
+  const attVer = tableVersions['StudentAttendance'] || 0;
+  const tltVer = tableVersions['ToiletPermits'] || 0;
+  const stdVer = tableVersions['Students'] || 0;
+  const clsVer = tableVersions['Classes'] || 0;
+
+  useEffect(() => {
+    if (notesVer === 0 && attVer === 0 && tltVer === 0 && stdVer === 0 && clsVer === 0) return;
+    fetchAllCounselingData().catch(() => {});
+  }, [fetchAllCounselingData, notesVer, attVer, tltVer, stdVer, clsVer]);
 
   // Export Problem Students to Excel
   const handleExportRadar = () => {
