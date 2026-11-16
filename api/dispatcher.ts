@@ -81,6 +81,68 @@ function getLocalTimeAndDate(): { dateStr: string; timeStr: string } {
   return { dateStr, timeStr };
 }
 
+function parseUtcDate(dateStr: string): Date {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return new Date();
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+function formatUtcDate(date: Date): string {
+  return date.toISOString().split('T')[0];
+}
+
+function getWeekRangeForDate(dateStr: string): { startDate: string; endDate: string } {
+  const d = parseUtcDate(dateStr);
+  const day = d.getUTCDay(); // 0=Sun..6=Sat
+  const diffToMon = (day + 6) % 7; // Mon=0..Sun=6
+  const start = new Date(d);
+  start.setUTCDate(d.getUTCDate() - diffToMon);
+  const end = new Date(start);
+  end.setUTCDate(start.getUTCDate() + 6);
+  return {
+    startDate: formatUtcDate(start),
+    endDate: formatUtcDate(end),
+  };
+}
+
+function getMonthRangeForYm(ym: string): { startDate: string; endDate: string } {
+  const [y, m] = ym.split('-').map(Number);
+  if (!y || !m) {
+    const today = getLocalTimeAndDate().dateStr;
+    return { startDate: `${today.slice(0, 7)}-01`, endDate: today };
+  }
+  const start = new Date(Date.UTC(y, m - 1, 1));
+  const end = new Date(Date.UTC(y, m, 0));
+  return {
+    startDate: formatUtcDate(start),
+    endDate: formatUtcDate(end),
+  };
+}
+
+function resolveTeacherForUser(
+  currentUser: TokenPayload | null,
+  teachers: Teacher[],
+  users: User[] = []
+): Teacher | undefined {
+  if (!teachers.length) return undefined;
+  if (!currentUser) return teachers[0];
+
+  const matchedUser = users.find(u => u.id === currentUser.userId);
+  const candidateEmail = (matchedUser?.email || '').toLowerCase();
+  const uname = (currentUser.username || '').toLowerCase();
+  const displayName = (currentUser.name || '').toLowerCase();
+
+  return (
+    teachers.find(
+      t =>
+        t.id === currentUser.userId ||
+        (candidateEmail && t.email.toLowerCase() === candidateEmail) ||
+        t.email.toLowerCase() === uname ||
+        t.name.toLowerCase() === displayName
+    ) || teachers[0]
+  );
+}
+
 // Main dispatcher function
 export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
   const parsedUrl = new URL(req.url, 'http://localhost');
@@ -754,13 +816,11 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
         permitType?: string;
       }) || {};
 
-      const teachers = await getTableRecords<Teacher>('Teachers');
-      // Match teacher with currentUser by email or name
-      const teacher = teachers.find(
-        t => t.email.toLowerCase() === currentUser.username.toLowerCase() ||
-             t.name.toLowerCase() === currentUser.name.toLowerCase() ||
-             t.id === currentUser.userId
-      ) || teachers[0]; // Fallback to first teacher if testing with demo admin
+      const [teachers, users] = await Promise.all([
+        getTableRecords<Teacher>('Teachers'),
+        getTableRecords<User>('Users'),
+      ]);
+      const teacher = resolveTeacherForUser(currentUser, teachers, users);
 
       if (!teacher) {
         return errorResponse('Data profil guru tidak ditemukan.', 404);
@@ -899,8 +959,11 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
     }
 
     if (pathname === '/api/attendance/teacher/history' && method === 'GET') {
-      const records = await getTableRecords<TeacherAttendance>('TeacherAttendance');
-      const teachers = await getTableRecords<Teacher>('Teachers');
+      const [records, teachers, users] = await Promise.all([
+        getTableRecords<TeacherAttendance>('TeacherAttendance'),
+        getTableRecords<Teacher>('Teachers'),
+        getTableRecords<User>('Users'),
+      ]);
 
       const enriched = records.map(r => {
         const teacher = teachers.find(t => t.id === r.teacherId);
@@ -912,12 +975,37 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
         };
       });
 
-      // Filter by teacherId if requested
-      const teacherId = req.query.teacherId ? String(req.query.teacherId) : undefined;
-      const filtered = teacherId ? enriched.filter(e => e.teacherId === teacherId) : enriched;
+      const mineParam = req.query.mine ? String(req.query.mine) : '';
+      const resolvedMine = mineParam === '1' || mineParam === 'true'
+        ? resolveTeacherForUser(currentUser, teachers, users)
+        : undefined;
+
+      const requestedTeacherId = req.query.teacherId ? String(req.query.teacherId) : resolvedMine?.id;
+      const dateFilter = req.query.date ? String(req.query.date) : undefined;
+      const startDateFilter = req.query.startDate ? String(req.query.startDate) : undefined;
+      const endDateFilter = req.query.endDate ? String(req.query.endDate) : undefined;
+      const monthFilter = req.query.month ? String(req.query.month) : undefined;
+
+      let filtered = requestedTeacherId
+        ? enriched.filter(e => e.teacherId === requestedTeacherId)
+        : enriched;
+
+      if (dateFilter) {
+        filtered = filtered.filter(e => e.date === dateFilter);
+      } else if (startDateFilter && endDateFilter) {
+        filtered = filtered.filter(e => e.date >= startDateFilter && e.date <= endDateFilter);
+      } else if (monthFilter) {
+        filtered = filtered.filter(e => e.date.startsWith(monthFilter));
+      }
+
       filtered.sort((a, b) => b.date.localeCompare(a.date) || (b.timeIn || '').localeCompare(a.timeIn || ''));
 
-      return jsonResponse({ success: true, data: filtered });
+      return jsonResponse({
+        success: true,
+        teacherId: requestedTeacherId || null,
+        teacherName: resolvedMine?.name || null,
+        data: filtered,
+      });
     }
 
     // --------------------------------------------------------------------------
@@ -1533,6 +1621,176 @@ export async function handleApiRoute(req: ApiRequest): Promise<ApiResponse> {
         studentSummaries,
         classSummaries,
         monthComparison,
+      });
+    }
+
+    if (pathname === '/api/reports/teacher-recap' && method === 'GET') {
+      const { dateStr: todayStr } = getLocalTimeAndDate();
+      const rawPeriod = req.query.period ? String(req.query.period) : 'daily';
+      const period: 'daily' | 'weekly' | 'monthly' =
+        rawPeriod === 'weekly' || rawPeriod === 'monthly' ? rawPeriod : 'daily';
+
+      const targetDate = req.query.date ? String(req.query.date) : todayStr;
+      const targetMonth = req.query.month ? String(req.query.month) : targetDate.slice(0, 7);
+      const teacherIdFilter = req.query.teacherId ? String(req.query.teacherId) : undefined;
+
+      let rangeStart = targetDate;
+      let rangeEnd = targetDate;
+
+      if (req.query.startDate && req.query.endDate) {
+        rangeStart = String(req.query.startDate);
+        rangeEnd = String(req.query.endDate);
+      } else if (period === 'weekly') {
+        const wr = getWeekRangeForDate(targetDate);
+        rangeStart = wr.startDate;
+        rangeEnd = wr.endDate;
+      } else if (period === 'monthly') {
+        const mr = getMonthRangeForYm(targetMonth);
+        rangeStart = mr.startDate;
+        rangeEnd = mr.endDate;
+      }
+
+      const [teachers, attendance] = await Promise.all([
+        getTableRecords<Teacher>('Teachers'),
+        getTableRecords<TeacherAttendance>('TeacherAttendance'),
+      ]);
+
+      const activeTeachers = teachers
+        .filter(t => t.isActive !== false)
+        .filter(t => !teacherIdFilter || t.id === teacherIdFilter);
+
+      const rangedRecords = attendance
+        .filter(r => r.date >= rangeStart && r.date <= rangeEnd)
+        .filter(r => !teacherIdFilter || r.teacherId === teacherIdFilter)
+        .map(r => {
+          const t = teachers.find(tc => tc.id === r.teacherId);
+          return {
+            ...r,
+            teacherName: t?.name || 'Guru',
+            nip: t?.nip || '',
+            subject: t?.subject || '',
+            email: t?.email || '',
+          };
+        })
+        .sort((a, b) => b.date.localeCompare(a.date) || (b.timeIn || '').localeCompare(a.timeIn || ''));
+
+      const teacherSummaries = activeTeachers.map(t => {
+        const tRecords = rangedRecords.filter(r => r.teacherId === t.id);
+        const tepatWaktu = tRecords.filter(r => r.status === 'Tepat Waktu').length;
+        const terlambat = tRecords.filter(r => r.status === 'Terlambat').length;
+        const izin = tRecords.filter(r => r.status === 'Izin').length;
+        const sakit = tRecords.filter(r => r.status === 'Sakit').length;
+        const totalHadir = tepatWaktu + terlambat;
+        const totalRecorded = tRecords.length;
+        const latest = tRecords[0] || null;
+        const attendanceRate =
+          totalRecorded > 0 ? Math.round((totalHadir / totalRecorded) * 100) : 0;
+
+        return {
+          teacherId: t.id,
+          teacherName: t.name,
+          nip: t.nip,
+          subject: t.subject,
+          email: t.email,
+          tepatWaktu,
+          terlambat,
+          izin,
+          sakit,
+          totalHadir,
+          totalRecorded,
+          belumPresensi: period === 'daily' && totalRecorded === 0 ? 1 : 0,
+          attendanceRate,
+          latestDate: latest?.date || null,
+          latestTimeIn: latest?.timeIn || null,
+          latestTimeOut: latest?.timeOut || null,
+          latestStatus: latest?.status || (period === 'daily' ? 'Belum Presensi' : '-'),
+          latestMethod: latest?.method || null,
+          notes: latest?.notes || null,
+        };
+      });
+
+      const tepatWaktuTotal = rangedRecords.filter(r => r.status === 'Tepat Waktu').length;
+      const terlambatTotal = rangedRecords.filter(r => r.status === 'Terlambat').length;
+      const izinTotal = rangedRecords.filter(r => r.status === 'Izin').length;
+      const sakitTotal = rangedRecords.filter(r => r.status === 'Sakit').length;
+      const hadirTotal = tepatWaktuTotal + terlambatTotal;
+      const belumPresensiTotal =
+        period === 'daily' ? teacherSummaries.filter(s => s.totalRecorded === 0).length : 0;
+
+      const attendanceRate =
+        period === 'daily'
+          ? activeTeachers.length > 0
+            ? Math.round((hadirTotal / activeTeachers.length) * 100)
+            : 0
+          : rangedRecords.length > 0
+          ? Math.round((hadirTotal / rangedRecords.length) * 100)
+          : 0;
+
+      // Daily breakdown across dates that have records (and full 7 days if weekly)
+      const breakdownMap = new Map<
+        string,
+        { date: string; tepatWaktu: number; terlambat: number; izin: number; sakit: number; total: number }
+      >();
+
+      if (period === 'weekly') {
+        const cursor = parseUtcDate(rangeStart);
+        const end = parseUtcDate(rangeEnd);
+        while (cursor <= end) {
+          const dStr = formatUtcDate(cursor);
+          breakdownMap.set(dStr, {
+            date: dStr,
+            tepatWaktu: 0,
+            terlambat: 0,
+            izin: 0,
+            sakit: 0,
+            total: 0,
+          });
+          cursor.setUTCDate(cursor.getUTCDate() + 1);
+        }
+      }
+
+      for (const r of rangedRecords) {
+        const entry = breakdownMap.get(r.date) || {
+          date: r.date,
+          tepatWaktu: 0,
+          terlambat: 0,
+          izin: 0,
+          sakit: 0,
+          total: 0,
+        };
+        if (r.status === 'Tepat Waktu') entry.tepatWaktu += 1;
+        else if (r.status === 'Terlambat') entry.terlambat += 1;
+        else if (r.status === 'Izin') entry.izin += 1;
+        else if (r.status === 'Sakit') entry.sakit += 1;
+        entry.total += 1;
+        breakdownMap.set(r.date, entry);
+      }
+
+      const dailyBreakdown = Array.from(breakdownMap.values()).sort((a, b) =>
+        a.date.localeCompare(b.date)
+      );
+
+      return jsonResponse({
+        success: true,
+        period,
+        targetDate,
+        month: targetMonth,
+        rangeStart,
+        rangeEnd,
+        totals: {
+          totalTeachers: activeTeachers.length,
+          totalRecords: rangedRecords.length,
+          tepatWaktu: tepatWaktuTotal,
+          terlambat: terlambatTotal,
+          izin: izinTotal,
+          sakit: sakitTotal,
+          hadirTotal,
+          belumPresensi: belumPresensiTotal,
+          attendanceRate,
+        },
+        teacherSummaries,
+        records: rangedRecords,
+        dailyBreakdown,
       });
     }
 

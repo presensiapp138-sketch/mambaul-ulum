@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import * as XLSX from 'xlsx';
 import {
   MapPin,
   Camera,
@@ -14,6 +15,10 @@ import {
   LogOut,
   Sparkles,
   ArrowLeft,
+  Calendar,
+  ChevronLeft,
+  ChevronRight,
+  Download,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { useAuth } from '../../context/AuthContext.tsx';
@@ -33,6 +38,49 @@ import { playSuccessChime, playErrorBeep } from '../../lib/soundEffects.ts';
 
 export interface TeacherAttendanceViewProps {
   onReturnToPortal?: () => void;
+}
+
+function shiftUtcDate(dateStr: string, deltaDays: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return dateStr;
+  const dt = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  return dt.toISOString().split('T')[0];
+}
+
+function shiftMonthDate(dateStr: string, deltaMonths: number): string {
+  const [y, m] = dateStr.split('-').map(Number);
+  if (!y || !m) return dateStr;
+  const dt = new Date(Date.UTC(y, m - 1 + deltaMonths, 1));
+  return dt.toISOString().split('T')[0];
+}
+
+function getWeekBounds(dateStr: string): { start: string; end: string } {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return { start: dateStr, end: dateStr };
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const diffToMon = (dt.getUTCDay() + 6) % 7;
+  const start = new Date(dt);
+  start.setUTCDate(dt.getUTCDate() - diffToMon);
+  const end = new Date(start);
+  end.setUTCDate(start.getUTCDate() + 6);
+  return {
+    start: start.toISOString().split('T')[0],
+    end: end.toISOString().split('T')[0],
+  };
+}
+
+function formatIndoShort(dateStr: string): string {
+  if (!dateStr) return '-';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return dateStr;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.toLocaleDateString('id-ID', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
 }
 
 export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ onReturnToPortal }) => {
@@ -57,8 +105,12 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // History & Form
+  // History, Date Check & Personal Recap
+  const todayStr = new Date().toISOString().split('T')[0];
   const [history, setHistory] = useState<TeacherAttendance[]>([]);
+  const [teacherDisplayName, setTeacherDisplayName] = useState<string>('');
+  const [selectedDate, setSelectedDate] = useState<string>(todayStr);
+  const [recapMode, setRecapMode] = useState<'daily' | 'weekly' | 'monthly' | 'all'>('weekly');
   const [fallbackTeacherTemplates, setFallbackTeacherTemplates] = useState<Array<{ personId: string; descriptor: number[] }>>([]);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -75,17 +127,21 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
   const [permitType, setPermitType] = useState<'Izin' | 'Sakit'>('Izin');
   const [permitNotes, setPermitNotes] = useState<string>('');
 
-  // Fetch school locations & teacher attendance history
+  // Fetch school locations & logged-in teacher's personal attendance history
   const loadData = useCallback(async () => {
     try {
       const [locRes, histRes, faceRes] = await Promise.all([
         apiRequest<SchoolLocation[]>('/api/locations'),
-        apiRequest<TeacherAttendance[]>('/api/attendance/teacher/history'),
+        apiRequest<TeacherAttendance[]>('/api/attendance/teacher/history?mine=1'),
         apiRequest<any[]>('/api/face-templates'),
       ]);
 
       if (locRes.success && locRes.data) setLocations(locRes.data);
-      if (histRes.success && histRes.data) setHistory(histRes.data);
+      if (histRes.success && histRes.data) {
+        setHistory(histRes.data);
+        const rawName = (histRes as unknown as { teacherName?: string }).teacherName;
+        if (rawName) setTeacherDisplayName(rawName);
+      }
       if (faceRes.success && faceRes.data) {
         setFallbackTeacherTemplates(faceRes.data.filter((f: any) => f.personType === 'teacher'));
       }
@@ -108,7 +164,7 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
       try {
         const [locRes, histRes] = await Promise.all([
           apiRequest<SchoolLocation[]>('/api/locations'),
-          apiRequest<TeacherAttendance[]>('/api/attendance/teacher/history'),
+          apiRequest<TeacherAttendance[]>('/api/attendance/teacher/history?mine=1'),
         ]);
         if (locRes.success && locRes.data) setLocations(locRes.data);
         if (histRes.success && histRes.data) setHistory(histRes.data);
@@ -359,7 +415,9 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
         await loadData();
         triggerSync();
       } else {
-        alert(res.error || 'Gagal mengajukan izin.');
+        playErrorBeep();
+        setShowPermitModal(false);
+        setFeedback({ type: 'error', message: res.error || 'Gagal mengajukan izin.' });
       }
     } finally {
       setIsSubmitting(false);
@@ -367,8 +425,76 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
   };
 
   // Today's attendance status
-  const todayStr = new Date().toISOString().split('T')[0];
   const todayRecord = history.find(h => h.date === todayStr);
+
+  // Before / Selected / After Date Checker
+  const prevDateStr = shiftUtcDate(selectedDate, -1);
+  const nextDateStr = shiftUtcDate(selectedDate, 1);
+  const prevDateRecord = history.find(h => h.date === prevDateStr);
+  const selectedDateRecord = history.find(h => h.date === selectedDate);
+  const nextDateRecord = history.find(h => h.date === nextDateStr);
+
+  // Filtered Recap Records anchored to selectedDate
+  const weekBounds = getWeekBounds(selectedDate);
+  const selectedMonthPrefix = selectedDate.slice(0, 7);
+
+  const recapRecords = useMemo(() => {
+    if (recapMode === 'daily') {
+      return history.filter(h => h.date === selectedDate);
+    }
+    if (recapMode === 'weekly') {
+      return history.filter(h => h.date >= weekBounds.start && h.date <= weekBounds.end);
+    }
+    if (recapMode === 'monthly') {
+      return history.filter(h => h.date.startsWith(selectedMonthPrefix));
+    }
+    return history;
+  }, [history, recapMode, selectedDate, weekBounds.start, weekBounds.end, selectedMonthPrefix]);
+
+  const recapStats = useMemo(() => {
+    const tepatWaktu = recapRecords.filter(r => r.status === 'Tepat Waktu').length;
+    const terlambat = recapRecords.filter(r => r.status === 'Terlambat').length;
+    const izin = recapRecords.filter(r => r.status === 'Izin').length;
+    const sakit = recapRecords.filter(r => r.status === 'Sakit').length;
+    return {
+      tepatWaktu,
+      terlambat,
+      izin,
+      sakit,
+      total: recapRecords.length,
+    };
+  }, [recapRecords]);
+
+  const handleStepRecap = (direction: -1 | 1) => {
+    if (recapMode === 'weekly') {
+      setSelectedDate(prev => shiftUtcDate(prev, direction * 7));
+    } else if (recapMode === 'monthly') {
+      setSelectedDate(prev => shiftMonthDate(prev, direction));
+    } else {
+      setSelectedDate(prev => shiftUtcDate(prev, direction));
+    }
+  };
+
+  const handleExportPersonalRecap = () => {
+    const wb = XLSX.utils.book_new();
+    const rows = recapRecords.map((r, idx) => ({
+      No: idx + 1,
+      Tanggal: r.date,
+      Nama_Guru: (r as any).teacherName || teacherDisplayName || user?.name || 'Guru',
+      Jam_Masuk: r.timeIn || '-',
+      Jam_Pulang: r.timeOut || '-',
+      Status: r.status,
+      Metode: r.method,
+      Catatan: r.notes || '-',
+    }));
+    const ws = XLSX.utils.json_to_sheet(
+      rows.length > 0
+        ? rows
+        : [{ Info: `Tidak ada data presensi pada rentang yang dipilih (${selectedDate})` }]
+    );
+    XLSX.utils.book_append_sheet(wb, ws, 'Rekap_Presensi_Guru');
+    XLSX.writeFile(wb, `Rekap_Presensi_${(teacherDisplayName || user?.name || 'Guru').replace(/\s+/g, '_')}_${selectedDate}.xlsx`);
+  };
 
   const isInsideRadius = nearestLocation
     ? nearestLocation.distanceMeters <= nearestLocation.location.radiusMeters
@@ -590,29 +716,262 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
           </div>
         </div>
 
-        {/* Right Column: Attendance History (5 cols) */}
-        <div className="lg:col-span-5 p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
-          <div className="flex items-center justify-between">
+        {/* Right Column: Cek Tanggal (Sebelum/Sesudah) & Rekap Presensi (5 cols) */}
+        <div className="lg:col-span-5 p-5 sm:p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+          {/* Header & Export */}
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <History className="w-4 h-4 text-slate-400" />
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white">Riwayat Presensi Pribadi</h3>
+              <History className="w-4 h-4 text-indigo-500" />
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Cek Tanggal & Rekap Presensi
+                </h3>
+                {teacherDisplayName && (
+                  <p className="text-[11px] text-slate-400">Guru: {teacherDisplayName}</p>
+                )}
+              </div>
             </div>
-            <span className="text-xs text-slate-400">{history.length} Catatan</span>
+            <button
+              type="button"
+              onClick={handleExportPersonalRecap}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 transition"
+              title="Unduh rekap sesuai tanggal/periode (.xlsx)"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Ekspor</span>
+            </button>
           </div>
 
-          <div className="space-y-2.5 max-h-[500px] overflow-y-auto pr-1">
-            {history.length === 0 ? (
-              <div className="py-12 text-center text-slate-400 text-xs">
-                Belum ada catatan riwayat presensi.
+          {/* Date Picker + Sebelum / Hari Ini / Sesudah */}
+          <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700 space-y-2.5">
+            <div className="flex items-center justify-between gap-1.5">
+              <button
+                type="button"
+                onClick={() => setSelectedDate(prev => shiftUtcDate(prev, -1))}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-bold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition"
+                title="Cek Tanggal Sebelumnya"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <span>Sebelum</span>
+              </button>
+
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700">
+                <Calendar className="w-3.5 h-3.5 text-indigo-500" />
+                <input
+                  type="date"
+                  value={selectedDate}
+                  onChange={e => e.target.value && setSelectedDate(e.target.value)}
+                  className="text-xs font-bold bg-transparent text-slate-900 dark:text-white focus:outline-none"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedDate(prev => shiftUtcDate(prev, 1))}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-bold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition"
+                title="Cek Tanggal Sesudahnya"
+              >
+                <span>Sesudah</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {selectedDate !== todayStr && (
+              <div className="flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setSelectedDate(todayStr)}
+                  className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
+                >
+                  Kembali ke Hari Ini ({todayStr})
+                </button>
+              </div>
+            )}
+
+            {/* 3-Card Comparison: Sebelum | Tanggal Dipilih | Sesudah */}
+            <div className="grid grid-cols-3 gap-2 pt-1">
+              {[
+                { label: 'Sebelum', date: prevDateStr, record: prevDateRecord, isCenter: false },
+                { label: 'Dipilih', date: selectedDate, record: selectedDateRecord, isCenter: true },
+                { label: 'Sesudah', date: nextDateStr, record: nextDateRecord, isCenter: false },
+              ].map(slot => (
+                <button
+                  key={slot.label}
+                  type="button"
+                  onClick={() => setSelectedDate(slot.date)}
+                  className={`p-2.5 rounded-xl text-left border transition ${
+                    slot.isCenter
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+                      : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-indigo-400 text-slate-800 dark:text-slate-200'
+                  }`}
+                >
+                  <div className={`text-[10px] font-bold uppercase ${slot.isCenter ? 'text-indigo-100' : 'text-slate-400'}`}>
+                    {slot.label}
+                  </div>
+                  <div className="text-[11px] font-bold truncate mt-0.5">{slot.date.slice(5)}</div>
+                  <div
+                    className={`mt-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded inline-block truncate max-w-full ${
+                      slot.record
+                        ? slot.isCenter
+                          ? 'bg-white/20 text-white'
+                          : slot.record.status === 'Tepat Waktu'
+                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                          : slot.record.status === 'Terlambat'
+                          ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                          : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                        : slot.isCenter
+                        ? 'bg-white/10 text-indigo-100'
+                        : 'bg-slate-100 text-slate-400 dark:bg-slate-800'
+                    }`}
+                  >
+                    {slot.record ? slot.record.status : 'Kosong'}
+                  </div>
+                  <div className={`text-[10px] mt-1 font-mono ${slot.isCenter ? 'text-indigo-100' : 'text-slate-400'}`}>
+                    {slot.record ? `${slot.record.timeIn || '-'} / ${slot.record.timeOut || '-'}` : '-'}
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            {/* Selected Date Full Inspection Detail */}
+            <div className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-800 dark:text-slate-100">
+                  Detail {formatIndoShort(selectedDate)}
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded-md font-bold text-[10px] ${
+                    selectedDateRecord
+                      ? selectedDateRecord.status === 'Tepat Waktu'
+                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                        : selectedDateRecord.status === 'Terlambat'
+                        ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                        : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                      : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                  }`}
+                >
+                  {selectedDateRecord ? selectedDateRecord.status : 'Tidak Ada Catatan'}
+                </span>
+              </div>
+              {selectedDateRecord ? (
+                <>
+                  <div className="flex items-center justify-between text-slate-500">
+                    <span>Masuk: <strong className="font-mono text-slate-800 dark:text-slate-200">{selectedDateRecord.timeIn || '-'}</strong></span>
+                    <span>Pulang: <strong className="font-mono text-slate-800 dark:text-slate-200">{selectedDateRecord.timeOut || '-'}</strong></span>
+                  </div>
+                  {selectedDateRecord.notes && (
+                    <div className="text-slate-400 italic">Catatan: {selectedDateRecord.notes}</div>
+                  )}
+                </>
+              ) : (
+                <div className="text-slate-400">
+                  Belum ada catatan masuk/izin pada tanggal ini. Gunakan tombol Sebelum / Sesudah untuk menelusuri tanggal lain.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Personal Period Recap Filter (Harian / Pekan / Bulanan / Semua) */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="inline-flex p-1 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                {[
+                  { id: 'daily', label: 'Harian' },
+                  { id: 'weekly', label: 'Pekan' },
+                  { id: 'monthly', label: 'Bulanan' },
+                  { id: 'all', label: 'Semua' },
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setRecapMode(tab.id as any)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                      recapMode === tab.id
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {recapMode !== 'all' && (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => handleStepRecap(-1)}
+                    className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300"
+                    title="Periode Sebelumnya"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleStepRecap(1)}
+                    className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300"
+                    title="Periode Sesudahnya"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="text-[11px] text-slate-500 flex items-center justify-between">
+              <span>
+                {recapMode === 'daily'
+                  ? `Tanggal ${formatIndoShort(selectedDate)}`
+                  : recapMode === 'weekly'
+                  ? `Pekan: ${weekBounds.start} s/d ${weekBounds.end}`
+                  : recapMode === 'monthly'
+                  ? `Bulan: ${selectedMonthPrefix}`
+                  : 'Seluruh Riwayat Tersimpan'}
+              </span>
+              <span className="font-semibold text-slate-400">{recapStats.total} Catatan</span>
+            </div>
+
+            {/* Summary KPI Strip */}
+            <div className="grid grid-cols-4 gap-2 text-center">
+              <div className="p-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/70 dark:border-emerald-900">
+                <div className="text-sm font-black text-emerald-700 dark:text-emerald-300">{recapStats.tepatWaktu}</div>
+                <div className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">Tepat</div>
+              </div>
+              <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200/70 dark:border-amber-900">
+                <div className="text-sm font-black text-amber-700 dark:text-amber-300">{recapStats.terlambat}</div>
+                <div className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">Telat</div>
+              </div>
+              <div className="p-2 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200/70 dark:border-blue-900">
+                <div className="text-sm font-black text-blue-700 dark:text-blue-300">{recapStats.izin}</div>
+                <div className="text-[10px] font-semibold text-blue-600 dark:text-blue-400">Izin</div>
+              </div>
+              <div className="p-2 rounded-xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200/70 dark:border-purple-900">
+                <div className="text-sm font-black text-purple-700 dark:text-purple-300">{recapStats.sakit}</div>
+                <div className="text-[10px] font-semibold text-purple-600 dark:text-purple-400">Sakit</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Filtered Attendance Records List */}
+          <div className="space-y-2 max-h-[290px] overflow-y-auto pr-1">
+            {recapRecords.length === 0 ? (
+              <div className="py-8 text-center text-slate-400 text-xs">
+                Belum ada catatan presensi pada rentang yang dipilih.
               </div>
             ) : (
-              history.map(item => (
-                <div
+              recapRecords.map(item => (
+                <button
                   key={item.id}
-                  className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 space-y-1 text-xs"
+                  type="button"
+                  onClick={() => setSelectedDate(item.date)}
+                  className={`w-full text-left p-3 rounded-2xl border space-y-1 text-xs transition ${
+                    item.date === selectedDate
+                      ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-700'
+                      : 'bg-slate-50 dark:bg-slate-800/60 border-slate-100 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+                  }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900 dark:text-white">{item.date}</span>
+                    <span className="font-bold text-slate-900 dark:text-white">{formatIndoShort(item.date)}</span>
                     <span
                       className={`px-2 py-0.5 rounded-md font-bold text-[10px] ${
                         item.status === 'Tepat Waktu'
@@ -634,7 +993,7 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
                       {item.notes}
                     </div>
                   )}
-                </div>
+                </button>
               ))
             )}
           </div>
