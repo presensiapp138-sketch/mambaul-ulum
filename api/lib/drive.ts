@@ -1,6 +1,7 @@
-import { google, drive_v3 } from 'googleapis';
+import { google } from 'googleapis';
+import type { drive_v3 } from 'googleapis';
 import { Readable } from 'stream';
-import { DatabaseSchema } from './types.ts';
+import type { DatabaseSchema } from './types.ts';
 import { getTableRecords, getSchoolSettings } from './db.ts';
 
 export function isGoogleDriveConfigured(): boolean {

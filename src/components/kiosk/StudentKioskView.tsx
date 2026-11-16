@@ -24,6 +24,9 @@ import { useSync } from '../../context/SyncContext.tsx';
 import { apiRequest } from '../../lib/api.ts';
 import {
   loadFaceDetectionModels,
+  areFaceModelsLoaded,
+  acquireCameraStream,
+  attachStreamToVideo,
   detectFacesInVideo,
   findBestFaceMatch,
   parseCameraError,
@@ -120,18 +123,31 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
     fetchData();
   }, [fetchData]);
 
-  // Preload face models in background immediately on kiosk mount for instant camera readiness
+  // Keep refs synced so detection loop always reads latest data without restarting
+  const studentsRef = useRef<Student[]>([]);
+  const classesRef = useRef<SchoolClass[]>([]);
+  const faceTemplatesRef = useRef<Array<{ personId: string; descriptor: number[] }>>([]);
+  useEffect(() => { studentsRef.current = students; }, [students]);
+  useEffect(() => { classesRef.current = classes; }, [classes]);
+  useEffect(() => { faceTemplatesRef.current = faceTemplates; }, [faceTemplates]);
+
+  // Preload face models in background immediately on kiosk mount
   useEffect(() => {
     let isMounted = true;
-    loadFaceDetectionModels()
-      .then(ok => {
-        if (isMounted) setModelStatus(ok ? 'ready' : 'error');
-      })
-      .catch(() => {
-        if (isMounted) setModelStatus('error');
-      });
+    if (areFaceModelsLoaded()) {
+      setModelStatus('ready');
+    } else {
+      setModelStatus('loading');
+      loadFaceDetectionModels()
+        .then(ok => {
+          if (isMounted) setModelStatus(ok ? 'ready' : 'error');
+        })
+        .catch(() => {
+          if (isMounted) setModelStatus('error');
+        });
+    }
 
-    // Auto-attempt fast camera activation on kiosk mount
+    // Auto-attempt instant camera activation on kiosk mount
     startCamera();
 
     return () => {
@@ -140,45 +156,39 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
     };
   }, []);
 
-  // Activate Camera with high-speed parallel loading & lean stream constraints
-  const startCamera = async () => {
+  // Activate Camera instantaneously across all devices without waiting for AI model downloads
+  const startCamera = async (modeOverride?: 'user' | 'environment') => {
+    const targetMode = modeOverride || facingMode;
     setCameraError(null);
     setCameraLoading(true);
 
     try {
-      // Lean video constraints so browser negotiates stream in milliseconds
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode,
-          width: { ideal: 640, max: 1280 },
-          height: { ideal: 480, max: 720 },
-          frameRate: { ideal: 30, max: 30 },
-        },
-        audio: false,
-      };
-
-      // Run media stream acquisition and face-api model loading simultaneously
-      const [stream, modelOk] = await Promise.all([
-        navigator.mediaDevices.getUserMedia(constraints),
-        loadFaceDetectionModels(),
-      ]);
-
+      // Stop any existing stream first so mobile devices release camera hardware cleanly
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
       }
+
+      // Kick off model loading in background without blocking camera stream startup
+      if (!areFaceModelsLoaded()) {
+        setModelStatus('loading');
+        loadFaceDetectionModels()
+          .then(ok => setModelStatus(ok ? 'ready' : 'error'))
+          .catch(() => setModelStatus('error'));
+      } else {
+        setModelStatus('ready');
+      }
+
+      // Open camera immediately with cross-device progressive fallback
+      const stream = await acquireCameraStream(targetMode);
       streamRef.current = stream;
 
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play().catch(console.warn);
-        };
-        await videoRef.current.play().catch(console.warn);
+        await attachStreamToVideo(videoRef.current, stream);
       }
 
       setIsCameraActive(true);
       setCameraLoading(false);
-      setModelStatus(modelOk ? 'ready' : 'error');
       startDetectionLoop();
     } catch (err: any) {
       setCameraLoading(false);
@@ -205,12 +215,17 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
     const nextMode = facingMode === 'user' ? 'environment' : 'user';
     setFacingMode(nextMode);
     if (isCameraActive) {
-      setTimeout(() => startCamera(), 100);
+      startCamera(nextMode);
     }
   };
 
   // Real-time Detection Loop (non-blocking 60fps video with throttled ~120ms async face detection)
   const startDetectionLoop = () => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+
     const runFrame = () => {
       if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended) {
         animFrameRef.current = requestAnimationFrame(runFrame);
@@ -228,7 +243,7 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
         }
 
         // Throttle face-api processing to once every 120ms so CPU/GPU runs cool and video never stutters
-        if (!isDetectingRef.current && now - lastDetectTimeRef.current >= 120) {
+        if (areFaceModelsLoaded() && !isDetectingRef.current && now - lastDetectTimeRef.current >= 120) {
           isDetectingRef.current = true;
           lastDetectTimeRef.current = now;
 
@@ -239,23 +254,26 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
 
                 const recognizedStudents: Array<{ student: Student; distance: number }> = [];
+                const currentTemplates = faceTemplatesRef.current;
+                const currentStudents = studentsRef.current;
+                const currentClasses = classesRef.current;
 
                 if (detections.length > 0) {
                   setHasFaceInFrame(true);
 
                   detections.forEach(det => {
                     const { box, descriptor } = det;
-                    const match = findBestFaceMatch(descriptor, faceTemplates);
+                    const match = findBestFaceMatch(descriptor, currentTemplates);
 
                     let studentName = 'Tidak Dikenali';
                     let className = '';
                     let isMatched = false;
 
                     if (match && match.isMatch) {
-                      const foundStudent = students.find(s => s.id === match.personId);
+                      const foundStudent = currentStudents.find(s => s.id === match.personId);
                       if (foundStudent) {
                         studentName = foundStudent.name;
-                        const cls = classes.find(c => c.id === foundStudent.classId);
+                        const cls = currentClasses.find(c => c.id === foundStudent.classId);
                         className = cls ? cls.name : '';
                         isMatched = true;
                         recognizedStudents.push({ student: foundStudent, distance: match.distance });
@@ -507,19 +525,19 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
                 )}
 
                 <button
-                  onClick={startCamera}
+                  onClick={() => startCamera()}
                   disabled={cameraLoading}
                   className="w-full py-4 px-6 rounded-2xl text-base font-bold text-white bg-blue-600 hover:bg-blue-500 active:scale-98 shadow-lg shadow-blue-600/30 transition flex items-center justify-center gap-3"
                 >
                   {cameraLoading ? (
                     <>
                       <RefreshCw className="w-5 h-5 animate-spin" />
-                      <span>Memulai Kamera...</span>
+                      <span>Membuka Kamera...</span>
                     </>
                   ) : (
                     <>
                       <Camera className="w-5 h-5" />
-                      <span>Aktifkan Kamera & Mulai</span>
+                      <span>{cameraError ? 'Coba Lagi' : 'Aktifkan Kamera & Mulai'}</span>
                     </>
                   )}
                 </button>
@@ -530,8 +548,14 @@ export const StudentKioskView: React.FC<StudentKioskViewProps> = ({ onReturnToPo
             {isCameraActive && (
               <div className="absolute top-4 left-4 right-4 flex items-center justify-between pointer-events-auto">
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/60 backdrop-blur-md text-white text-xs font-medium border border-white/10">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                  <span>Kamera Aktif • Deteksi Realtime</span>
+                  <span className={`w-2 h-2 rounded-full animate-pulse ${modelStatus === 'ready' ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                  <span>
+                    {modelStatus === 'ready'
+                      ? 'Kamera Aktif • Deteksi Realtime'
+                      : modelStatus === 'error'
+                      ? 'Kamera Aktif • Mode Scan Kartu'
+                      : 'Kamera Aktif • Menyiapkan AI...'}
+                  </span>
                 </div>
 
                 <div className="flex items-center gap-2">

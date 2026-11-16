@@ -3,6 +3,10 @@ import * as faceapi from '@vladmandic/face-api';
 let modelsLoaded = false;
 let modelLoadingPromise: Promise<boolean> | null = null;
 
+export function areFaceModelsLoaded(): boolean {
+  return modelsLoaded;
+}
+
 export async function loadFaceDetectionModels(): Promise<boolean> {
   if (modelsLoaded) return true;
   if (modelLoadingPromise) return modelLoadingPromise;
@@ -10,7 +14,6 @@ export async function loadFaceDetectionModels(): Promise<boolean> {
   modelLoadingPromise = (async () => {
     try {
       const MODEL_URL = '/models';
-      // Load SSD MobileNet or TinyFaceDetector, landmark, and recognition models
       await Promise.all([
         faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
         faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL),
@@ -19,8 +22,7 @@ export async function loadFaceDetectionModels(): Promise<boolean> {
       modelsLoaded = true;
       return true;
     } catch (err) {
-      console.error('Failed to load face detection models:', err);
-      // Fallback: try loading standard SSD MobileNet
+      console.error('Failed to load tiny face detection models:', err);
       try {
         await Promise.all([
           faceapi.nets.ssdMobilenetv1.loadFromUri('/models'),
@@ -31,12 +33,129 @@ export async function loadFaceDetectionModels(): Promise<boolean> {
         return true;
       } catch (fallbackErr) {
         console.error('Fallback face model loading failed:', fallbackErr);
+        modelLoadingPromise = null;
         return false;
       }
     }
   })();
 
   return modelLoadingPromise;
+}
+
+export function preloadFaceModelsInBackground(): void {
+  if (typeof window === 'undefined' || modelsLoaded || modelLoadingPromise) return;
+  const trigger = () => {
+    loadFaceDetectionModels().catch(() => {});
+  };
+  if ('requestIdleCallback' in window) {
+    (window as any).requestIdleCallback(trigger, { timeout: 1500 });
+  } else {
+    setTimeout(trigger, 300);
+  }
+}
+
+/**
+ * Universal, fast cross-device camera stream acquisition.
+ * Uses progressive constraint fallback so phones (iOS/Android), tablets,
+ * laptops, and external USB webcams open immediately without OverconstrainedError.
+ */
+export async function acquireCameraStream(
+  preferredFacingMode: 'user' | 'environment' = 'user'
+): Promise<MediaStream> {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('Browser ini tidak mendukung akses kamera atau halaman tidak dibuka melalui HTTPS.');
+  }
+
+  const attempts: MediaStreamConstraints[] = [
+    // Attempt 1: Ideal facing mode + light 480p resolution for instant negotiation & smooth FPS
+    {
+      video: {
+        facingMode: { ideal: preferredFacingMode },
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+      },
+      audio: false,
+    },
+    // Attempt 2: Only ideal facingMode without resolution constraints
+    {
+      video: {
+        facingMode: { ideal: preferredFacingMode },
+      },
+      audio: false,
+    },
+    // Attempt 3: Universal basic video fallback for older webcams/drivers
+    {
+      video: true,
+      audio: false,
+    },
+  ];
+
+  let lastError: any = null;
+
+  for (const constraints of attempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err: any) {
+      lastError = err;
+      const errName = err?.name || '';
+      // If user explicitly denied permission or camera is locked by another app, don't retry
+      if (
+        errName === 'NotAllowedError' ||
+        errName === 'PermissionDeniedError' ||
+        errName === 'NotReadableError' ||
+        errName === 'TrackStartError'
+      ) {
+        throw err;
+      }
+    }
+  }
+
+  throw lastError || new Error('Gagal membuka kamera pada perangkat ini.');
+}
+
+/**
+ * Safely attach a MediaStream to an HTMLVideoElement across iOS Safari, Android Chrome, and desktop browsers.
+ */
+export async function attachStreamToVideo(
+  video: HTMLVideoElement,
+  stream: MediaStream
+): Promise<void> {
+  video.setAttribute('playsinline', 'true');
+  video.setAttribute('autoplay', 'true');
+  video.playsInline = true;
+  video.muted = true;
+  video.autoplay = true;
+  video.srcObject = stream;
+
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => {
+      if (!resolved) {
+        resolved = true;
+        resolve();
+      }
+    };
+
+    if (video.readyState >= 1) {
+      video.play().catch(() => {});
+      done();
+      return;
+    }
+
+    const onLoaded = () => {
+      video.removeEventListener('loadedmetadata', onLoaded);
+      video.play().catch(() => {});
+      done();
+    };
+
+    video.addEventListener('loadedmetadata', onLoaded);
+    // Safety timeout so video never stalls UI if metadata event was already missed
+    setTimeout(() => {
+      video.removeEventListener('loadedmetadata', onLoaded);
+      video.play().catch(() => {});
+      done();
+    }, 500);
+  });
 }
 
 export interface DetectedFaceResult {
@@ -49,7 +168,7 @@ export interface DetectedFaceResult {
 export async function detectFacesInVideo(
   video: HTMLVideoElement
 ): Promise<DetectedFaceResult[]> {
-  if (!modelsLoaded || !video || video.readyState < 2) return [];
+  if (!modelsLoaded || !video || video.readyState < 2 || video.videoWidth === 0) return [];
 
   try {
     const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
@@ -78,10 +197,13 @@ export async function detectFacesInVideo(
 export async function detectSingleFaceDescriptor(
   video: HTMLVideoElement
 ): Promise<number[] | null> {
-  if (!modelsLoaded || !video || video.readyState < 2) return null;
+  if (!modelsLoaded) {
+    await loadFaceDetectionModels();
+  }
+  if (!modelsLoaded || !video || video.readyState < 2 || video.videoWidth === 0) return null;
 
   try {
-    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
+    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.45 });
     const detection = await faceapi
       .detectSingleFace(video, options)
       .withFaceLandmarks(true)
@@ -153,7 +275,7 @@ export function parseCameraError(err: any): { title: string; message: string } {
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
     return {
       title: 'Izin Kamera Ditolak',
-      message: 'Harap izinkan akses kamera pada pengaturan browser untuk melanjutkan.',
+      message: 'Harap izinkan akses kamera pada ikon gembok/pengaturan browser lalu tekan Coba Lagi.',
     };
   }
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
@@ -165,13 +287,13 @@ export function parseCameraError(err: any): { title: string; message: string } {
   if (name === 'NotReadableError' || name === 'TrackStartError') {
     return {
       title: 'Kamera Sedang Digunakan',
-      message: 'Kamera sedang dipakai oleh aplikasi lain (seperti Zoom/Meet). Tutup aplikasi tersebut dan coba lagi.',
+      message: 'Kamera sedang dipakai oleh aplikasi atau tab lain. Tutup aplikasi tersebut dan tekan Coba Lagi.',
     };
   }
   if (name === 'OverconstrainedError') {
     return {
       title: 'Resolusi Kamera Tidak Didukung',
-      message: 'Spesifikasi kamera yang diminta tidak dapat dipenuhi perangkat.',
+      message: 'Coba ganti kamera depan/belakang atau tekan Coba Lagi.',
     };
   }
 

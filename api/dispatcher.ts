@@ -15,14 +15,14 @@ import {
   comparePassword,
   hashPassword,
   extractBearerToken,
-  TokenPayload,
 } from './lib/auth.ts';
+import type { TokenPayload } from './lib/auth.ts';
 import {
   isGoogleDriveConfigured,
   createDatabaseBackup,
   uploadAttendancePhoto,
 } from './lib/drive.ts';
-import {
+import type {
   User,
   Teacher,
   SchoolClass,

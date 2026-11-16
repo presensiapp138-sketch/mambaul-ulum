@@ -10,6 +10,7 @@ import {
   FileText,
   Navigation,
   RefreshCw,
+  RotateCcw,
   LogOut,
   Sparkles,
   ArrowLeft,
@@ -21,6 +22,9 @@ import { Teacher, TeacherAttendance, SchoolLocation } from '../../types/index.ts
 import { apiRequest } from '../../lib/api.ts';
 import {
   loadFaceDetectionModels,
+  areFaceModelsLoaded,
+  acquireCameraStream,
+  attachStreamToVideo,
   detectSingleFaceDescriptor,
   findBestFaceMatch,
   parseCameraError,
@@ -45,6 +49,10 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
   // Camera & Face state
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [cameraLoading, setCameraLoading] = useState<boolean>(false);
+  const [modelStatus, setModelStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(() =>
+    areFaceModelsLoaded() ? 'ready' : 'idle'
+  );
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [cameraError, setCameraError] = useState<{ title: string; message: string } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -142,23 +150,56 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
     }
   }, [currentCoords, locations]);
 
-  // Start Camera for Face Verification
-  const startCamera = async () => {
+  // Preload face AI models immediately on mount so verification is instant
+  useEffect(() => {
+    let isMounted = true;
+    if (areFaceModelsLoaded()) {
+      setModelStatus('ready');
+    } else {
+      setModelStatus('loading');
+      loadFaceDetectionModels()
+        .then(ok => {
+          if (isMounted) setModelStatus(ok ? 'ready' : 'error');
+        })
+        .catch(() => {
+          if (isMounted) setModelStatus('error');
+        });
+    }
+    return () => {
+      isMounted = false;
+      stopCamera();
+    };
+  }, []);
+
+  // Start Camera immediately without waiting for AI model downloads
+  const startCamera = async (modeOverride?: 'user' | 'environment') => {
+    const targetMode = modeOverride || facingMode;
     setCameraError(null);
     setCameraLoading(true);
+
     try {
-      await loadFaceDetectionModels();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: 480, height: 480 },
-        audio: false,
-      });
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+
+      if (!areFaceModelsLoaded()) {
+        setModelStatus('loading');
+        loadFaceDetectionModels()
+          .then(ok => setModelStatus(ok ? 'ready' : 'error'))
+          .catch(() => setModelStatus('error'));
+      } else {
+        setModelStatus('ready');
+      }
+
+      const stream = await acquireCameraStream(targetMode);
       streamRef.current = stream;
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        await attachStreamToVideo(videoRef.current, stream);
       }
       setIsCameraActive(true);
     } catch (err: any) {
+      setIsCameraActive(false);
       setCameraError(parseCameraError(err));
     } finally {
       setCameraLoading(false);
@@ -173,9 +214,13 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
     setIsCameraActive(false);
   };
 
-  useEffect(() => {
-    return () => stopCamera();
-  }, []);
+  const switchCamera = () => {
+    const nextMode = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(nextMode);
+    if (isCameraActive) {
+      startCamera(nextMode);
+    }
+  };
 
   // Submit Check-In or Check-Out
   const handleAttendanceSubmit = async (actionType: 'checkIn' | 'checkOut') => {
@@ -401,7 +446,7 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
           </div>
 
           {/* Camera View Card */}
-          <div className="relative rounded-3xl overflow-hidden bg-slate-900 border border-slate-800 shadow-xl min-h-[300px] flex flex-col items-center justify-center p-6 text-center">
+          <div className="relative rounded-3xl overflow-hidden bg-slate-900 border border-slate-800 shadow-xl min-h-[300px] flex flex-col items-center justify-center p-4 sm:p-6 text-center">
             <video
               ref={videoRef}
               playsInline
@@ -417,33 +462,60 @@ export const TeacherAttendanceView: React.FC<TeacherAttendanceViewProps> = ({ on
                 <div className="space-y-1">
                   <h4 className="text-base font-bold text-white">Kamera Verifikasi Wajah</h4>
                   <p className="text-xs text-slate-400">
-                    Gunakan kamera depan untuk verifikasi wajah biometric presensi guru.
+                    Bisa dibuka di HP, tablet, maupun laptop dengan kamera depan atau belakang.
                   </p>
                 </div>
 
                 {cameraError && (
-                  <div className="p-3 rounded-xl bg-red-950 border border-red-800 text-xs text-red-300 text-left">
-                    {cameraError.message}
+                  <div className="p-3 rounded-xl bg-red-950 border border-red-800 text-xs text-red-300 text-left space-y-1">
+                    <div className="font-bold text-red-200">{cameraError.title}</div>
+                    <div>{cameraError.message}</div>
                   </div>
                 )}
 
                 <button
-                  onClick={startCamera}
+                  onClick={() => startCamera()}
                   disabled={cameraLoading}
-                  className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition shadow"
+                  className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition shadow flex items-center gap-2 mx-auto"
                 >
-                  {cameraLoading ? 'Memuat Model...' : 'Aktifkan Kamera'}
+                  {cameraLoading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Membuka Kamera...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-4 h-4" />
+                      <span>{cameraError ? 'Coba Lagi' : 'Aktifkan Kamera'}</span>
+                    </>
+                  )}
                 </button>
               </div>
             )}
 
             {isCameraActive && (
-              <button
-                onClick={stopCamera}
-                className="mt-3 px-4 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-semibold transition"
-              >
-                Tutup Kamera
-              </button>
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                <span className="px-3 py-1.5 rounded-xl bg-slate-800 text-slate-200 text-[11px] font-medium flex items-center gap-1.5 border border-slate-700">
+                  <span className={`w-2 h-2 rounded-full ${modelStatus === 'ready' ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
+                  {modelStatus === 'ready' ? 'AI Siap' : 'Menyiapkan AI...'}
+                </span>
+                <button
+                  type="button"
+                  onClick={switchCamera}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition flex items-center gap-1.5 border border-slate-700"
+                  title="Ganti Kamera Depan/Belakang"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Ganti Kamera</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={stopCamera}
+                  className="px-4 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-semibold transition"
+                >
+                  Tutup Kamera
+                </button>
+              </div>
             )}
           </div>
 

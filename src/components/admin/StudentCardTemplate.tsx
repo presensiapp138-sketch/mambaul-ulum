@@ -210,115 +210,111 @@ export const StudentCardFront: React.FC<StudentCardProps> = ({
         </div>
       </div>
 
-      {/* Center Body: Student Photo + Info Table + Principal Signature */}
-      <div className="px-3.5 py-1.5 flex items-start gap-3 flex-1 relative z-10">
-        {/* Student Portrait Box with Formal Blue Background (Standar Pas Foto Biru) */}
-        <div className="flex flex-col items-center flex-shrink-0">
-          <div
-            style={{ backgroundColor: '#1e40af' }} // Formal Blue Background
-            className="w-[84px] h-[108px] rounded-lg overflow-hidden border-2 border-slate-300 shadow-sm relative flex items-center justify-center"
-          >
-            <img
-              src={photoUrl}
-              alt={student.name}
-              className="w-full h-full object-cover object-top"
-              crossOrigin="anonymous"
-            />
-            {/* Stamp overlay corner */}
-            <div className="absolute -bottom-2 -right-2 transform -rotate-12 pointer-events-none opacity-80">
-              <FoundationSealSvg color="#059669" />
+      {/* Center & Bottom Body: Photo + Info on Top, Barcode (Left) + Principal Signature (Right) on Bottom */}
+      <div className="px-3.5 py-2 flex-1 flex flex-col justify-between relative z-10">
+        {/* Top Row: Student Photo + Info Fields */}
+        <div className="flex items-start gap-3">
+          {/* Student Portrait Box with Formal Blue Background (Standar Pas Foto Biru) */}
+          <div className="flex flex-col items-center flex-shrink-0">
+            <div
+              style={{ backgroundColor: '#1e40af' }}
+              className="w-[78px] h-[98px] rounded-lg overflow-hidden border-2 border-slate-300 shadow-sm relative flex items-center justify-center"
+            >
+              <img
+                src={photoUrl}
+                alt={student.name}
+                className="w-full h-full object-cover object-top"
+                crossOrigin="anonymous"
+              />
+              {/* Stamp overlay corner */}
+              <div className="absolute -bottom-2 -right-2 transform -rotate-12 pointer-events-none opacity-80">
+                <FoundationSealSvg color="#059669" />
+              </div>
+            </div>
+            <span className="text-[7.5px] font-bold text-slate-500 mt-0.5 uppercase tracking-wider">
+              {student.gender === 'L' ? 'LAKI-LAKI' : 'PEREMPUAN'}
+            </span>
+          </div>
+
+          {/* Student Data Fields */}
+          <div className="flex-1 min-w-0 space-y-1 text-[10px]">
+            <div>
+              <div className="text-[7.5px] uppercase font-bold text-slate-400 leading-none">Nama Lengkap</div>
+              <div className="text-[11.5px] font-black text-slate-900 tracking-tight truncate">
+                {student.name.toUpperCase()}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-x-2 gap-y-1 pt-0.5">
+              <div>
+                <div className="text-[7.5px] font-bold text-slate-400 leading-none">NIS / NISN</div>
+                <div className="font-mono text-[9px] font-black text-slate-800">
+                  {student.nis} / <span className="text-blue-700">{student.nisn || student.nis}</span>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[7.5px] font-bold text-slate-400 leading-none">Kelas & Unit</div>
+                <div className="text-[9px] font-bold text-slate-800 truncate">
+                  {schoolClass?.name || 'Reguler'} ({config.level})
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[7.5px] font-bold text-slate-400 leading-none">Tempat, Tgl Lahir</div>
+                <div className="text-[8.5px] font-semibold text-slate-700 truncate">
+                  {student.birthPlace || 'Jombang'}, {student.birthDate || '12-08-2009'}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[7.5px] font-bold text-slate-400 leading-none">Masa Berlaku</div>
+                <div className="text-[8.5px] font-semibold text-emerald-700">
+                  Selama Menjadi Santri
+                </div>
+              </div>
             </div>
           </div>
-          <span className="text-[8px] font-bold text-slate-500 mt-0.5 uppercase tracking-wider">
-            {student.gender === 'L' ? 'LAKI-LAKI' : 'PEREMPUAN'}
-          </span>
         </div>
 
-        {/* Student Data Fields */}
-        <div className="flex-1 space-y-1 text-[10px]">
-          <div>
-            <div className="text-[8px] uppercase font-bold text-slate-400 leading-none">Nama Lengkap</div>
-            <div className="text-xs font-black text-slate-900 tracking-tight line-clamp-1">
-              {student.name.toUpperCase()}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 pt-0.5">
-            <div>
-              <div className="text-[7.5px] font-bold text-slate-400 leading-none">NIS / NISN</div>
-              <div className="font-mono text-[9px] font-black text-slate-800">
-                {student.nis} / <span className="text-blue-700">{student.nisn || student.nis}</span>
-              </div>
-            </div>
-
-            <div>
-              <div className="text-[7.5px] font-bold text-slate-400 leading-none">Kelas & Unit</div>
-              <div className="text-[9px] font-bold text-slate-800">
-                {schoolClass?.name || 'Reguler'} ({config.level})
-              </div>
-            </div>
-
-            <div>
-              <div className="text-[7.5px] font-bold text-slate-400 leading-none">Tempat, Tgl Lahir</div>
-              <div className="text-[8.5px] font-semibold text-slate-700 line-clamp-1">
-                {student.birthPlace || 'Jombang'}, {student.birthDate || '12-08-2009'}
-              </div>
-            </div>
-
-            <div>
-              <div className="text-[7.5px] font-bold text-slate-400 leading-none">Masa Berlaku</div>
-              <div className="text-[8.5px] font-semibold text-emerald-700">
-                Selama Menjadi Santri
-              </div>
+        {/* Bottom Row: Barcode NISN (Sebelah Kiri) & Tanda Tangan Kepala Sekolah (Sebelah Kanan) */}
+        <div className="flex items-end justify-between gap-2.5 pt-1 pb-0.5">
+          {/* Barcode NISN positioned cleanly to the left of the principal signature */}
+          <div className="flex-1 max-w-[222px] bg-white rounded-xl border border-slate-300 px-2.5 py-1.5 shadow-2xs flex flex-col items-center justify-center">
+            <div
+              className="w-full flex items-center justify-center overflow-hidden h-8"
+              dangerouslySetInnerHTML={{ __html: barcodeSvg }}
+            />
+            <div className="text-center font-mono text-[9.5px] font-black tracking-widest text-slate-900 mt-1 leading-none">
+              NISN: {student.nisn || student.nis}
             </div>
           </div>
 
           {/* Principal Signature & Seal Box (Pojok Kanan Bawah) */}
-          <div className="pt-0.5 flex justify-end items-end relative">
-            <div className="text-right text-[7.5px] leading-tight relative pr-1">
-              <div className="text-slate-500 font-medium">Jombang, 15 Juli 2026</div>
-              <div className="text-[7.5px] font-bold text-slate-700">Kepala {config.unitName}</div>
-              
-              {/* Overlaid Signature and Seal */}
-              <div className="h-8 relative my-0.5 flex justify-end items-center">
-                <div className="absolute right-10 -top-2">
-                  <FoundationSealSvg color="#047857" />
-                </div>
-                <div className="relative z-10 flex items-center justify-end">
-                  {config.principalSignatureUrl ? (
-                    <img
-                      src={config.principalSignatureUrl}
-                      alt={`TTD ${config.principalName}`}
-                      className="h-8 max-w-[100px] object-contain select-none pointer-events-none"
-                    />
-                  ) : (
-                    <PrincipalSignatureSvg color="#1e3a8a" />
-                  )}
-                </div>
+          <div className="text-right text-[7.5px] leading-tight relative pr-0.5 flex-shrink-0 max-w-[168px]">
+            <div className="text-slate-500 font-medium">Jombang, 15 Juli 2026</div>
+            <div className="text-[7.5px] font-bold text-slate-700 truncate">Kepala {config.unitName}</div>
+
+            {/* Overlaid Signature and Seal */}
+            <div className="h-8 relative my-0.5 flex justify-end items-center">
+              <div className="absolute right-10 -top-2">
+                <FoundationSealSvg color="#047857" />
               </div>
-
-              <div className="font-bold text-slate-900 underline text-[8px]">{config.principalName}</div>
-              <div className="text-[7px] text-slate-500 font-mono">{config.principalNip}</div>
+              <div className="relative z-10 flex items-center justify-end">
+                {config.principalSignatureUrl ? (
+                  <img
+                    src={config.principalSignatureUrl}
+                    alt={`TTD ${config.principalName}`}
+                    className="h-8 max-w-[100px] object-contain select-none pointer-events-none"
+                  />
+                ) : (
+                  <PrincipalSignatureSvg color="#1e3a8a" />
+                )}
+              </div>
             </div>
-          </div>
-        </div>
-      </div>
 
-      {/* Barcode NISN: Lebih Jelas & Posisi Berjarak dari Tepi Bawah (Tidak Terlalu Kebawah) */}
-      <div className="px-3.5 pb-2.5 pt-1 relative z-10">
-        <div className="bg-slate-50 rounded-xl border border-slate-300/90 px-3 py-1.5 shadow-2xs flex items-center justify-between gap-3">
-          <div className="flex-1">
-            <div
-              className="w-full flex items-center justify-center overflow-hidden h-6.5"
-              dangerouslySetInnerHTML={{ __html: barcodeSvg }}
-            />
-            <div className="text-center font-mono text-[9px] font-black tracking-widest text-slate-900 mt-0.5">
-              * NISN: {student.nisn || student.nis} *
-            </div>
-          </div>
-          <div className="text-[7px] text-slate-500 font-bold leading-tight border-l border-slate-300 pl-2.5 text-right flex-shrink-0">
-            <div className="text-blue-800 font-black">PRESENSI SMART</div>
-            <div>RFID & BARCODE</div>
+            <div className="font-bold text-slate-900 underline text-[8px] truncate">{config.principalName}</div>
+            <div className="text-[7px] text-slate-500 font-mono truncate">{config.principalNip}</div>
           </div>
         </div>
       </div>

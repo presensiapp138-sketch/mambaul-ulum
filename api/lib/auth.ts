@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { User, Role } from './types.ts';
+import type { User, Role } from './types.ts';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'presensi-default-secret-key-2026';
 

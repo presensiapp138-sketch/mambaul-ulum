@@ -10,6 +10,7 @@ import { CounselingDashboard } from './components/counseling/CounselingDashboard
 import { TeacherAttendanceView } from './components/teacher/TeacherAttendanceView.tsx';
 import { AdminDashboard } from './components/admin/AdminDashboard.tsx';
 import { ErrorPage } from './components/common/ErrorPage.tsx';
+import { preloadFaceModelsInBackground } from './lib/faceDetection.ts';
 
 function MainApp() {
   const { user, isAuthenticated } = useAuth();
@@ -28,6 +29,11 @@ function MainApp() {
     return false;
   });
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Preload face AI models quietly in background so cameras open instantly
+  useEffect(() => {
+    preloadFaceModelsInBackground();
+  }, []);
 
   // Sync dark mode with HTML root
   useEffect(() => {

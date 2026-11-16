@@ -38,7 +38,11 @@ import {
 import { apiRequest } from '../../lib/api.ts';
 import {
   loadFaceDetectionModels,
+  areFaceModelsLoaded,
+  acquireCameraStream,
+  attachStreamToVideo,
   detectSingleFaceDescriptor,
+  parseCameraError,
 } from '../../lib/faceDetection.ts';
 import { CardSkeleton, TableSkeleton } from '../common/Skeleton.tsx';
 import { ConfirmModal } from '../common/ConfirmModal.tsx';
@@ -597,27 +601,40 @@ const FaceDatabaseSection: React.FC<{
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [message, setMessage] = useState<string | null>(null);
 
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   const enrolledPersonIds = new Set(faceTemplates.map(f => f.personId));
 
-  const startCamera = async () => {
+  useEffect(() => {
+    if (!areFaceModelsLoaded()) {
+      loadFaceDetectionModels().catch(() => {});
+    }
+    return () => stopCamera();
+  }, []);
+
+  const startCamera = async (modeOverride?: 'user' | 'environment') => {
+    const targetMode = modeOverride || facingMode;
     setCameraLoading(true);
     setMessage(null);
     try {
-      await loadFaceDetectionModels();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: 480, height: 480 },
-      });
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+      if (!areFaceModelsLoaded()) {
+        loadFaceDetectionModels().catch(() => {});
+      }
+      const stream = await acquireCameraStream(targetMode);
       streamRef.current = stream;
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        await attachStreamToVideo(videoRef.current, stream);
       }
       setIsCameraActive(true);
     } catch (e: any) {
-      alert('Gagal mengakses kamera: ' + (e.message || ''));
+      const parsed = parseCameraError(e);
+      alert(`${parsed.title}: ${parsed.message}`);
     } finally {
       setCameraLoading(false);
     }
@@ -631,9 +648,13 @@ const FaceDatabaseSection: React.FC<{
     setIsCameraActive(false);
   };
 
-  useEffect(() => {
-    return () => stopCamera();
-  }, []);
+  const switchCamera = () => {
+    const nextMode = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(nextMode);
+    if (isCameraActive) {
+      startCamera(nextMode);
+    }
+  };
 
   // Capture face descriptor and save vector to server
   const handleEnrollFace = async () => {
@@ -789,18 +810,18 @@ const FaceDatabaseSection: React.FC<{
                 <p className="text-xs text-slate-400">Tekan tombol di bawah untuk menyalakan kamera</p>
                 <button
                   type="button"
-                  onClick={startCamera}
+                  onClick={() => startCamera()}
                   disabled={!selectedPersonId || cameraLoading}
                   className="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl disabled:opacity-50"
                 >
-                  {cameraLoading ? 'Memulai...' : 'Nyalakan Kamera Pendaftaran'}
+                  {cameraLoading ? 'Membuka Kamera...' : 'Nyalakan Kamera Pendaftaran'}
                 </button>
               </div>
             )}
           </div>
 
           {isCameraActive && (
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={handleEnrollFace}
@@ -808,6 +829,13 @@ const FaceDatabaseSection: React.FC<{
                 className="flex-1 py-3 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow transition"
               >
                 {isCapturing ? 'Mengekstrak Vektor...' : 'Ambil Foto & Simpan Vektor'}
+              </button>
+              <button
+                type="button"
+                onClick={switchCamera}
+                className="px-4 py-3 text-xs font-semibold rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700"
+              >
+                Ganti Kamera
               </button>
               <button
                 type="button"

@@ -3,19 +3,28 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig, Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import { handleApiRoute, ApiRequest } from './api/dispatcher.ts';
+import type { ApiRequest } from './api/dispatcher.ts';
 
 // Vite Dev Server middleware plugin to handle /api routes locally
 function devApiPlugin(): Plugin {
   return {
     name: 'dev-api-middleware',
     configureServer(server) {
+      let handleApiRoutePromise: Promise<(req: ApiRequest) => Promise<{ statusCode: number; headers: Record<string, string>; body: unknown }>> | null = null;
+
       server.middlewares.use(async (req, res, next) => {
         if (!req.url || !req.url.startsWith('/api')) {
           return next();
         }
 
         try {
+          if (!handleApiRoutePromise) {
+            handleApiRoutePromise = server
+              .ssrLoadModule('./api/dispatcher.ts')
+              .then((mod) => mod.handleApiRoute);
+          }
+          const handleApiRoute = await handleApiRoutePromise;
+
           let body: unknown = undefined;
           if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
             const chunks: Buffer[] = [];
@@ -108,8 +117,7 @@ export default defineConfig(() => {
           maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
     ],

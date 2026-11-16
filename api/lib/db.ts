@@ -1,5 +1,6 @@
-import { google, sheets_v4 } from 'googleapis';
-import {
+import { google } from 'googleapis';
+import type { sheets_v4 } from 'googleapis';
+import type {
   DatabaseSchema,
   User,
   Teacher,
@@ -435,8 +436,14 @@ function getInitialSeedData(): DatabaseSchema {
   };
 }
 
-// In-memory store fallback when Google credentials are not yet set
-let memoryStore: DatabaseSchema = getInitialSeedData();
+// In-memory store fallback when Google credentials are not yet set (lazy initialized)
+let _memoryStore: DatabaseSchema | null = null;
+function getMemoryStore(): DatabaseSchema {
+  if (!_memoryStore) {
+    _memoryStore = getInitialSeedData();
+  }
+  return _memoryStore;
+}
 
 export function isGoogleSheetsConfigured(): boolean {
   return Boolean(
@@ -622,7 +629,7 @@ export async function getTableRecords<T>(tableName: keyof DatabaseSchema): Promi
   }
 
   if (!isGoogleSheetsConfigured()) {
-    const data = (memoryStore[tableName] as unknown) as T[];
+    const data = (getMemoryStore()[tableName] as unknown) as T[];
     cacheStore[cacheKey] = { data, timestamp: now };
     return data;
   }
@@ -674,7 +681,7 @@ export async function getTableRecords<T>(tableName: keyof DatabaseSchema): Promi
     return records;
   } catch (err) {
     console.warn(`Failed to read from Google Sheet ${tableName}, falling back to memory:`, err);
-    return (memoryStore[tableName] as unknown) as T[];
+    return (getMemoryStore()[tableName] as unknown) as T[];
   }
 }
 
@@ -699,10 +706,10 @@ export async function appendRecord<T extends { id: string; updatedAt?: string }>
   delete cacheStore[`table_${tableName}`];
 
   if (!isGoogleSheetsConfigured()) {
-    const list = memoryStore[tableName] as unknown as T[];
+    const list = getMemoryStore()[tableName] as unknown as T[];
     list.push(fullRecord);
     // Record changelog in memory
-    memoryStore.ChangeLog.push({
+    getMemoryStore().ChangeLog.push({
       id: `chg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       tableName,
       recordId: fullRecord.id,
@@ -749,7 +756,7 @@ export async function updateRecord<T extends { id: string; updatedAt?: string }>
   delete cacheStore[`table_${tableName}`];
 
   if (!isGoogleSheetsConfigured()) {
-    const list = memoryStore[tableName] as unknown as T[];
+    const list = getMemoryStore()[tableName] as unknown as T[];
     const idx = list.findIndex(r => r.id === id);
     if (idx === -1) throw new Error(`Record with id ${id} not found in ${tableName}`);
 
@@ -767,7 +774,7 @@ export async function updateRecord<T extends { id: string; updatedAt?: string }>
     };
     list[idx] = updated;
 
-    memoryStore.ChangeLog.push({
+    getMemoryStore().ChangeLog.push({
       id: `chg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       tableName,
       recordId: id,
@@ -859,11 +866,11 @@ export async function deleteRecord(
   delete cacheStore[`table_${tableName}`];
 
   if (!isGoogleSheetsConfigured()) {
-    const list = memoryStore[tableName] as unknown as { id: string }[];
+    const list = getMemoryStore()[tableName] as unknown as { id: string }[];
     const idx = list.findIndex(r => r.id === id);
     if (idx !== -1) {
       list.splice(idx, 1);
-      memoryStore.ChangeLog.push({
+      getMemoryStore().ChangeLog.push({
         id: `chg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         tableName,
         recordId: id,
@@ -943,7 +950,7 @@ async function recordChangeLog(
 
   try {
     if (!isGoogleSheetsConfigured()) {
-      memoryStore.ChangeLog.push(changeEntry);
+      getMemoryStore().ChangeLog.push(changeEntry);
       return;
     }
     const sheets = getGoogleSheetsClient();
@@ -995,7 +1002,7 @@ export async function recordAudit(
 
   try {
     if (!isGoogleSheetsConfigured()) {
-      memoryStore.AuditLog.push(entry);
+      getMemoryStore().AuditLog.push(entry);
       return;
     }
     const sheets = getGoogleSheetsClient();
@@ -1031,7 +1038,7 @@ export async function getSchoolSettings(): Promise<SchoolSettings> {
   const map: Record<string, string> = { ...defaults };
 
   if (!isGoogleSheetsConfigured()) {
-    Object.assign(map, memoryStore.Settings);
+    Object.assign(map, getMemoryStore().Settings);
   } else {
     const records = await getTableRecords<{ key: string; value: string }>('Settings');
     if (Array.isArray(records)) {
@@ -1067,7 +1074,7 @@ export async function getSchoolSettings(): Promise<SchoolSettings> {
 export async function updateSchoolSetting(key: string, value: string, updatedBy: string = 'admin'): Promise<void> {
   const now = new Date().toISOString();
   if (!isGoogleSheetsConfigured()) {
-    memoryStore.Settings[key] = value;
+    getMemoryStore().Settings[key] = value;
     return;
   }
 
